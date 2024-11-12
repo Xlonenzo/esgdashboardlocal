@@ -2263,7 +2263,11 @@ def get_bond_projects(bond_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/bonds/{bond_id}/projects")
-def relate_bond_projects(bond_id: int, data: dict, db: Session = Depends(get_db)):
+def create_bond_project_relation(
+    bond_id: int,
+    data: dict,
+    db: Session = Depends(get_db)
+):
     try:
         # Verificar se o título existe
         bond = db.query(models.Bond).filter(models.Bond.id == bond_id).first()
@@ -2276,6 +2280,7 @@ def relate_bond_projects(bond_id: int, data: dict, db: Session = Depends(get_db)
         projects = db.query(models.ProjectTracking)\
             .filter(models.ProjectTracking.id.in_(project_ids))\
             .all()
+            
         if len(projects) != len(project_ids):
             raise HTTPException(status_code=404, detail="Um ou mais projetos não encontrados")
         
@@ -2289,13 +2294,14 @@ def relate_bond_projects(bond_id: int, data: dict, db: Session = Depends(get_db)
             relation = models.BondProjectRelation(
                 bond_id=bond_id,
                 project_id=project_id,
-                created_by="system"
+                created_by="system",
+                created_at=func.now()
             )
             db.add(relation)
         
         db.commit()
         return {"message": "Relações atualizadas com sucesso"}
-    
+        
     except Exception as e:
         db.rollback()
         logger.error(f"Erro ao relacionar projetos ao título: {str(e)}")
