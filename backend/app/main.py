@@ -2334,4 +2334,121 @@ def get_all_relationships(db: Session = Depends(get_db)):
         logger.error(f"Erro ao buscar relacionamentos: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/bond-types-summary", response_model=List[schemas.BondTypesSummary])
+async def get_bond_types_summary(db: Session = Depends(get_db)):
+    try:
+        query = text("""
+            SELECT type, count, total_value, percentage 
+            FROM xlonesg.bond_types_summary 
+            WHERE type != '' 
+            ORDER BY count DESC
+        """)
+        
+        result = db.execute(query)
+        bond_types = result.fetchall()
+        
+        return [
+            {
+                "type": row.type,
+                "count": row.count,
+                "total_value": float(row.total_value),
+                "percentage": float(row.percentage)
+            }
+            for row in bond_types
+        ]
+    except Exception as e:
+        logger.error(f"Erro ao buscar resumo dos tipos de bonds: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Erro ao buscar dados dos tipos de bonds"
+        )
+
+@app.get("/api/indicator-counts")
+async def get_indicator_counts(db: Session = Depends(get_db)):
+    try:
+        query = text("""
+            SELECT 
+                unnest(compliance) as compliance_type,
+                COUNT(*) as count
+            FROM xlonesg.kpi_templates
+            WHERE compliance IS NOT NULL
+            GROUP BY compliance_type
+            ORDER BY count DESC
+        """)
+        
+        result = db.execute(query)
+        counts = result.fetchall()
+        
+        return [
+            {
+                "type": row.compliance_type,
+                "count": row.count
+            }
+            for row in counts
+        ]
+    except Exception as e:
+        logger.error(f"Erro ao buscar contagem de indicadores por compliance: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Erro ao buscar dados dos indicadores"
+        )
+
+@app.get("/api/diversidade-racial")
+async def get_diversidade_racial(db: Session = Depends(get_db)):
+    try:
+        query = text("""
+            SELECT 
+                COALESCE(raca, 'Não Informado') as raca,
+                COUNT(*) as count,
+                COUNT(*)::float / SUM(COUNT(*)) OVER () * 100 as percentage
+            FROM xlonesg.kpi_templates
+            WHERE category = 'Diversidade'
+            GROUP BY raca
+            ORDER BY count DESC
+        """)
+        
+        result = db.execute(query)
+        data = result.fetchall()
+        
+        return [
+            {
+                "raca": row.raca,
+                "count": row.count,
+                "percentage": float(row.percentage)
+            }
+            for row in data
+        ]
+    except Exception as e:
+        logger.error(f"Erro ao buscar dados de diversidade racial: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Erro ao buscar dados de diversidade racial"
+        )
+
+@app.get("/api/project-budget-detail")
+async def get_project_budget_detail(db: Session = Depends(get_db)):
+    try:
+        query = text("""
+            SELECT 
+                name,
+                project_type,
+                COALESCE(SUM(budget_allocated), 0) as total_budget_allocated
+            FROM xlonesg.project_tracking
+            GROUP BY name, project_type
+            ORDER BY total_budget_allocated DESC
+            LIMIT 20
+        """)
+        
+        result = db.execute(query)
+        return [
+            {
+                "name": row.name,
+                "project_type": row.project_type,
+                "total_budget_allocated": float(row.total_budget_allocated)
+            }
+            for row in result
+        ]
+    except Exception as e:
+        logger.error(f"Erro ao buscar detalhes de orçamento dos projetos: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 

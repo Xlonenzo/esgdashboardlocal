@@ -680,3 +680,13 @@ class ComplianceAudit(ComplianceAuditBase):
     model_config = {
         "from_attributes": True
     }
+
+
+class BondTypesSummary(BaseModel):
+    type: str
+    count: int
+    total_value: float
+    percentage: float
+
+    class Config:
+        from_attributes = True
