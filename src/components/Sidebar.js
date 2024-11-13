@@ -17,6 +17,8 @@ function Sidebar({
   fontColor,
   isESGTrackerOpen,
   setIsESGTrackerOpen,
+  isPortfolioOpen,
+  setIsPortfolioOpen,
 }) {
   // Função para renderizar cada item do menu
   const renderMenuItem = (item, isSubItem = false) => (
@@ -29,6 +31,8 @@ function Sidebar({
             setIsAdminOpen(!isAdminOpen);
           } else if (item.name === 'Rastreador ESG') {
             setIsESGTrackerOpen(!isESGTrackerOpen);
+          } else if (item.name === 'Portfólio ESG') {
+            setIsPortfolioOpen(!isPortfolioOpen);
           } else {
             setActiveMenuItem(item.path);
           }
@@ -49,7 +53,8 @@ function Sidebar({
               <span className="ml-auto">
                 {(item.name === 'Análises' && isAnalyticsOpen) ||
                 (item.name === 'Painel de Administração' && isAdminOpen) ||
-                (item.name === 'Rastreador ESG' && isESGTrackerOpen) ? (
+                (item.name === 'Rastreador ESG' && isESGTrackerOpen) ||
+                (item.name === 'Portfólio ESG' && isPortfolioOpen) ? (
                   <ChevronDown size={16} />
                 ) : (
                   <ChevronRight size={16} />
@@ -65,7 +70,8 @@ function Sidebar({
         item.subItems &&
         ((item.name === 'Análises' && isAnalyticsOpen) ||
          (item.name === 'Painel de Administração' && isAdminOpen) ||
-         (item.name === 'Rastreador ESG' && isESGTrackerOpen)) && (
+         (item.name === 'Rastreador ESG' && isESGTrackerOpen) ||
+         (item.name === 'Portfólio ESG' && isPortfolioOpen)) && (
           <ul className="mt-1 space-y-1">
             {item.subItems.map((subItem) => renderMenuItem(subItem, true))}
           </ul>

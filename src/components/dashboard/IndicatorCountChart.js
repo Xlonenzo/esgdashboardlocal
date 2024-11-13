@@ -48,7 +48,7 @@ function IndicatorCountChart() {
           />
           <Bar 
             dataKey="count" 
-            fill="#8884d8"
+            fill="#0088FE"
             label={{ 
               position: 'right',
               formatter: (value) => `${value}`,

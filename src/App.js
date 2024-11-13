@@ -28,6 +28,7 @@ import Materiality from './components/Materiality';
 import Investment from './components/Investment';
 import Compliance from './components/Compliance';
 import BondProjectRelation from './components/bond/BondProjectRelation';
+import PortfolioFinanceiro from './components/portfolio/PortfolioFinanceiro';
 
 // Importar dados e estilos
 import articlesData from './data/articles';
@@ -65,6 +66,7 @@ function App() {
   const [kpiTemplates, setKpiTemplates] = useState([]);
   const [kpiEntries, setKpiEntries] = useState([]);
   const [isRegistering, setIsRegistering] = useState(false);
+  const [isPortfolioOpen, setIsPortfolioOpen] = useState(false);
 
   useEffect(() => {
     fetchCustomization();
@@ -230,6 +232,13 @@ function App() {
         ) : <UnauthorizedAccess />;
       case '/bonds/projects':
         return <BondProjectRelation />;
+      case '/portfolio/financial':
+        return ['admin', 'editor'].includes(userRole) ? (
+          <PortfolioFinanceiro 
+            sidebarColor={customization.sidebar_color} 
+            buttonColor={customization.button_color} 
+          />
+        ) : <UnauthorizedAccess />;
       default:
         return <div>Selecione uma opção do menu</div>;
     }
@@ -271,6 +280,8 @@ function App() {
             logo={customization.logo_url}
             buttonColor={customization.button_color}
             fontColor={customization.font_color}
+            isPortfolioOpen={isPortfolioOpen}
+            setIsPortfolioOpen={setIsPortfolioOpen}
           />
 
           <main className="flex-1 overflow-y-auto p-8">

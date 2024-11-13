@@ -18,7 +18,8 @@ import {
   TruckIcon,
   Wallet,
   Shield,
-  Link
+  Link,
+  LineChart
 } from 'lucide-react';
 
 const menuItemsData = [
@@ -43,6 +44,17 @@ const menuItemsData = [
       { name: 'Governança', icon: <Briefcase size={20} />, path: '/analytics/governance' },
       { name: 'Social', icon: <Users size={20} />, path: '/analytics/social' },
       { name: 'Comparação de KPI', icon: <Sliders size={20} />, path: '/analytics/comparacao-kpi' },
+    ],
+  },
+  {
+    name: 'Portfólio ESG',
+    icon: <LineChart size={20} />,
+    path: '/portfolio',
+    subItems: [
+      { name: 'Portfólio Social', icon: <Users size={20} />, path: '/portfolio/social' },
+      { name: 'Portfólio Ambiental', icon: <Leaf size={20} />, path: '/portfolio/environmental' },
+      { name: 'Portfólio Financeiro', icon: <Wallet size={20} />, path: '/portfolio/financial' },
+      { name: 'Portfólio de Governança', icon: <Briefcase size={20} />, path: '/portfolio/governance' },
     ],
   },
   { name: 'KPIs', icon: <FileText size={20} />, path: '/kpi-templates' },
