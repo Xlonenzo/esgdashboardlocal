@@ -2452,3 +2452,35 @@ async def get_project_budget_detail(db: Session = Depends(get_db)):
         logger.error(f"Erro ao buscar detalhes de orçamento dos projetos: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/bonds-total-value")
+async def get_bonds_total_value(db: Session = Depends(get_db)):
+    try:
+        # Adicione um log para debug
+        logger.info("Buscando valor total e contagem de bonds")
+        
+        query = text("""
+            SELECT 
+                total_value,
+                (SELECT COUNT(*) FROM xlonesg.bonds) as bonds_count
+            FROM xlonesg.vw_bonds_total_value
+        """)
+        
+        result = db.execute(query)
+        row = result.fetchone()
+        
+        response_data = {
+            "total_value": float(row.total_value) if row.total_value else 0,
+            "bonds_count": int(row.bonds_count)
+        }
+        
+        # Log para verificar os dados retornados
+        logger.info(f"Dados retornados: {response_data}")
+        
+        return response_data
+    except Exception as e:
+        logger.error(f"Erro ao buscar valor total dos bonds: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Erro ao buscar valor total dos bonds"
+        )
+

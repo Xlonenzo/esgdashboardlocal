@@ -5,6 +5,7 @@ import BondTypesChart from './dashboard/BondTypesChart';
 import IndicatorCountChart from './dashboard/IndicatorCountChart';
 import ProjectBudgetDetail from './dashboard/ProjectBudgetDetail';
 import { FaStar } from 'react-icons/fa';
+import BondsTotalValue from './dashboard/BondsTotalValue';
 
 function HomeContent() {
   const [favoriteKpis, setFavoriteKpis] = useState([]);
@@ -76,14 +77,20 @@ function HomeContent() {
           <IndicatorCountChart />
         </div>
         <div>
-          <h3 className="text-xl font-bold mb-4">Distribuição de Tipos de Bonds</h3>
+          <h3 className="text-xl font-bold mb-4">Distribuição de Tipos de Títulos</h3>
           <BondTypesChart />
         </div>
       </div>
 
-      <div className="mt-8">
-        <h3 className="text-xl font-bold mb-4">Orçamento Total em Projetos</h3>
-        <ProjectBudgetDetail />
+      <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-8">
+        <div>
+          <h3 className="text-xl font-bold mb-4">Valor Total em Títulos</h3>
+          <BondsTotalValue />
+        </div>
+        <div>
+          <h3 className="text-xl font-bold mb-4">Orçamento Total em Projetos</h3>
+          <ProjectBudgetDetail />
+        </div>
       </div>
     </div>
   );
