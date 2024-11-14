@@ -27,15 +27,17 @@ function PortfolioSocial({ sidebarColor, buttonColor }) {
         {/* Gráficos */}
         <div className="space-y-6">
           {/* Gráfico de Distribuição Racial em uma linha própria */}
-          <div className="bg-white p-4 rounded-lg shadow">
+          <div className="bg-white p-6 rounded-lg shadow">
             <h3 className="text-xl font-bold mb-4">Distribuição de Diversidade Racial</h3>
-            <DistribuicaoRacialChart />
+            <div className="h-160">
+              <DistribuicaoRacialChart />
+            </div>
           </div>
           
           {/* Gráfico de Impacto por Área */}
           <div className="bg-white p-4 rounded-lg shadow">
             <h3 className="text-xl font-bold mb-4">Impacto por Área</h3>
-            <div className="h-64 flex items-center justify-center bg-gray-50">
+            <div className="h-80 flex items-center justify-center bg-gray-50">
               Gráfico em desenvolvimento
             </div>
           </div>
