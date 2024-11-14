@@ -2484,3 +2484,47 @@ async def get_bonds_total_value(db: Session = Depends(get_db)):
             detail="Erro ao buscar valor total dos bonds"
         )
 
+@app.get("/api/kpi-racial-distribution")
+async def get_racial_distribution(db: Session = Depends(get_db)):
+    try:
+        query = text("""
+            SELECT 
+                kt.name as raca,
+                ke.actual_value as quantidade
+            FROM xlonesg.kpi_entries ke
+            JOIN xlonesg.kpi_templates kt ON ke.template_id = kt.id
+            WHERE ke.template_id IN (56, 45, 46, 47, 48, 49)
+            AND ke.actual_value > 0
+        """)
+        
+        result = db.execute(query)
+        data = result.fetchall()
+        
+        if not data:
+            return {
+                "total": 0,
+                "dados": []
+            }
+            
+        total = sum(row.quantidade for row in data)
+        
+        dados = []
+        for row in data:
+            percentual = (row.quantidade / total * 100) if total > 0 else 0
+            dados.append({
+                "raca": row.raca,
+                "quantidade": row.quantidade,
+                "percentual": round(percentual, 2)
+            })
+        
+        return {
+            "total": total,
+            "dados": dados
+        }
+    except Exception as e:
+        logger.error(f"Erro ao buscar distribuição racial: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Erro ao buscar dados de distribuição racial"
+        )
+

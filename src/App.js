@@ -29,6 +29,9 @@ import Investment from './components/Investment';
 import Compliance from './components/Compliance';
 import BondProjectRelation from './components/bond/BondProjectRelation';
 import PortfolioFinanceiro from './components/portfolio/PortfolioFinanceiro';
+import PortfolioAmbiental from './components/portfolio/PortfolioAmbiental';
+import PortfolioGovernanca from './components/portfolio/PortfolioGovernanca';
+import PortfolioSocial from './components/portfolio/PortfolioSocial';
 
 // Importar dados e estilos
 import articlesData from './data/articles';
@@ -40,6 +43,13 @@ import './index.css';
 
 // Importar configuração
 import { API_URL } from './config';
+
+// Componente para exibir mensagem de acesso não autorizado
+const UnauthorizedAccess = () => (
+  <div className="text-red-600 font-bold">
+    Acesso não autorizado. Você não tem permissão para visualizar esta página.
+  </div>
+);
 
 function App() {
   const [activeMenuItem, setActiveMenuItem] = useState('/');
@@ -239,6 +249,27 @@ function App() {
             buttonColor={customization.button_color} 
           />
         ) : <UnauthorizedAccess />;
+      case '/portfolio/environmental':
+        return ['admin', 'editor'].includes(userRole) ? (
+          <PortfolioAmbiental 
+            sidebarColor={customization.sidebar_color} 
+            buttonColor={customization.button_color} 
+          />
+        ) : <UnauthorizedAccess />;
+      case '/portfolio/governance':
+        return ['admin', 'editor'].includes(userRole) ? (
+          <PortfolioGovernanca 
+            sidebarColor={customization.sidebar_color} 
+            buttonColor={customization.button_color} 
+          />
+        ) : <UnauthorizedAccess />;
+      case '/portfolio/social':
+        return ['admin', 'editor'].includes(userRole) ? (
+          <PortfolioSocial 
+            sidebarColor={customization.sidebar_color} 
+            buttonColor={customization.button_color} 
+          />
+        ) : <UnauthorizedAccess />;
       default:
         return <div>Selecione uma opção do menu</div>;
     }
@@ -297,10 +328,3 @@ function App() {
 }
 
 export default App;
-
-// Componente para exibir mensagem de acesso não autorizado
-const UnauthorizedAccess = () => (
-  <div className="text-red-600 font-bold">
-    Acesso não autorizado. Você não tem permissão para visualizar esta página.
-  </div>
-);
