@@ -28,9 +28,4 @@ jobs:
         run: npm install
 
       - name: Run tests
-<<<<<<< HEAD
         run: npm test
-=======
-        run: npm test
-
->>>>>>> 74aec5a498dd3dd62744e04aa96ad86151806e88
