@@ -7,7 +7,7 @@ on:
   pull_request:
     branches:
       - main
-  workflow_dispatch:  # Permite execução manual
+  workflow_dispatch:
 
 jobs:
   build:
@@ -24,8 +24,30 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
       - name: Install dependencies
-        run: npm install
+        run: |
+          npm cache clean --force
+          npm install --legacy-peer-deps
+
+      - name: Audit dependencies
+        run: |
+          echo "Executando auditoria de segurança..."
+          npm audit
+        continue-on-error: true
+
+      - name: Run security audit fix
+        run: |
+          npm audit fix || true
+          npm audit fix --force || true
+        continue-on-error: true
 
       - name: Run tests
         run: npm test
