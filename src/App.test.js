@@ -1,8 +1,20 @@
 import { render, screen } from '@testing-library/react';
 import App from './App';
 
-test('renders learn react link', () => {
-  render(<App />);
-  const linkElement = screen.getByText(/learn react/i);
-  expect(linkElement).toBeInTheDocument();
+describe('App Component', () => {
+  test('renderiza o formulário de login', () => {
+    render(<App />);
+    
+    // Verifica se os elementos principais do login existem
+    expect(screen.getByPlaceholderText('Senha')).toBeInTheDocument();
+    expect(screen.getByText('Entrar')).toBeInTheDocument();
+  });
+
+  // Você pode adicionar mais testes aqui
+  test('renderiza campos de input corretamente', () => {
+    render(<App />);
+    
+    const passwordInput = screen.getByPlaceholderText('Senha');
+    expect(passwordInput).toHaveAttribute('type', 'password');
+  });
 });
