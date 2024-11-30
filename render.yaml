@@ -15,8 +15,12 @@ services:
   - type: web
     name: react-frontend
     runtime: static
-    buildCommand: npm install --legacy-peer-deps && npm run build
+    buildCommand: |
+      echo "SKIP_PREFLIGHT_CHECK=true" > .env
+      echo "REACT_APP_API_URL=$API_URL" >> .env
+      npm install --legacy-peer-deps
+      npm run build
     staticPublishPath: ./build
     envVars:
-      - key: REACT_APP_API_URL
-        value: https://fastapi-backend.onrender.com 
+      - key: API_URL
+        value: "https://seu-backend.onrender.com"
