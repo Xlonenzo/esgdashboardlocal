@@ -1,7 +1,84 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { FaEdit, FaTrash, FaFilter } from 'react-icons/fa';
+import { FaEdit, FaTrash, FaFilter, FaExclamationCircle } from 'react-icons/fa';
 import { API_URL } from '../config';
+
+// Definição dos campos obrigatórios
+const REQUIRED_FIELDS = {
+    cnpj: 'CNPJ',
+    name: 'Nome da Empresa',
+    razao_social: 'Razão Social'
+};
+
+// Componente para label com indicador de obrigatório
+const RequiredFieldLabel = ({ htmlFor, children }) => (
+    <div className="flex items-center gap-1">
+        <label htmlFor={htmlFor} className="block text-sm font-medium text-gray-700">
+            {children}
+        </label>
+        <div 
+            className="text-red-500 opacity-40 hover:opacity-60 transition-opacity" 
+            title="Campo obrigatório"
+        >
+            <FaExclamationCircle size={12} />
+        </div>
+    </div>
+);
+
+// Função para formatar CNPJ durante digitação
+const formatCNPJ = (value) => {
+    // Remove tudo que não é número
+    const numericValue = value.replace(/\D/g, '');
+    
+    // Aplica a máscara XX.XXX.XXX/XXXX-XX
+    return numericValue
+        .replace(/^(\d{2})(\d)/, '$1.$2')
+        .replace(/^(\d{2})\.(\d{3})(\d)/, '$1.$2.$3')
+        .replace(/\.(\d{3})(\d)/, '.$1/$2')
+        .replace(/(\d{4})(\d)/, '$1-$2')
+        .substring(0, 18); // Limita ao tamanho máximo do CNPJ formatado
+};
+
+// Função para formatar CEP durante digitação
+const formatCEP = (value) => {
+    // Remove tudo que não é número
+    const numericValue = value.replace(/\D/g, '');
+    
+    // Aplica a máscara XXXXX-XXX
+    return numericValue
+        .replace(/^(\d{5})(\d)/, '$1-$2')
+        .substring(0, 9); // Limita ao tamanho máximo do CEP formatado
+};
+
+// Função para formatar telefone
+const formatPhone = (value) => {
+    // Remove tudo que não é número
+    const numericValue = value.replace(/\D/g, '');
+    
+    // Verifica se é celular (9 dígitos) ou fixo (8 dígitos)
+    if (numericValue.length <= 10) {
+        // Formato: (XX) XXXX-XXXX
+        return numericValue
+            .replace(/^(\d{2})(\d)/, '($1) $2')
+            .replace(/(\d{4})(\d)/, '$1-$2')
+            .substring(0, 14);
+    } else {
+        // Formato: (XX) XXXXX-XXXX
+        return numericValue
+            .replace(/^(\d{2})(\d)/, '($1) $2')
+            .replace(/(\d{5})(\d)/, '$1-$2')
+            .substring(0, 15);
+    }
+};
+
+// Função para remover formatação
+const removeFormat = (value) => {
+    return value ? value.replace(/\D/g, '') : '';
+};
+
+const removePhoneFormat = (value) => {
+    return value ? value.replace(/\D/g, '') : '';
+};
 
 function CompanyManagement({ buttonColor }) {
   const [companies, setCompanies] = useState([]);
@@ -33,75 +110,101 @@ function CompanyManagement({ buttonColor }) {
     is_active: ''
   });
 
-  // Adicionar opções de tamanho
+  // Definição de opções para selects
   const sizeOptions = ['Micro', 'Pequena', 'Média', 'Grande'];
-
-  // Adicionar opções de setores
   const sectorOptions = [
-    'Tecnologia da Informação (TI)',
-    'Saúde',
-    'Bens de Capital',
-    'Consumo Cíclico',
-    'Consumo Não-Cíclico',
+    'Agronegócio',
+    'Alimentos e Bebidas',
+    'Automobilístico',
+    'Bancário e Financeiro',
+    'Comércio Varejista',
+    'Construção Civil',
+    'Consultoria',
+    'Educação',
     'Energia',
-    'Financeiro',
-    'Materiais Básicos',
+    'Farmacêutico',
+    'Hotelaria e Turismo',
     'Imobiliário',
+    'Indústria',
+    'Infraestrutura',
+    'Logística e Transportes',
+    'Metalurgia e Siderurgia',
+    'Mineração',
+    'Papel e Celulose',
+    'Petróleo e Gás',
+    'Química e Petroquímica',
+    'Saúde',
+    'Seguros',
     'Serviços',
-    'Utilidades Públicas',
+    'Tecnologia da Informação',
     'Telecomunicações',
-    'Transporte e Logística',
-    'Setor Público'
+    'Têxtil e Confecção',
+    'Varejo',
+    'Outros'
   ];
 
   // Adicionar estados para mensagens de erro
   const [errors, setErrors] = useState({
     email: '',
-    website: ''
+    website: '',
+    validation: []
   });
 
   // Função para validar email
   const validateEmail = (email) => {
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    return emailRegex.test(email);
+    const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return re.test(email);
   };
 
   // Função para validar website
   const validateWebsite = (website) => {
-    const urlRegex = /^(https?:\/\/)?([\da-z.-]+)\.([a-z.]{2,6})([/\w .-]*)*\/?$/;
-    return urlRegex.test(website);
+    const re = /^(https?:\/\/)?([\da-z.-]+)\.([a-z.]{2,6})([/\w .-]*)*\/?$/;
+    return re.test(website);
   };
 
-  // Função para lidar com mudança no email
-  const handleEmailChange = (e, isEditing) => {
+  // Função para validar campos obrigatórios
+  const validateRequiredFields = (company) => {
+    const validationErrors = [];
+    Object.entries(REQUIRED_FIELDS).forEach(([field, label]) => {
+        if (!company[field]) {
+            validationErrors.push(`${label} é obrigatório`);
+        }
+    });
+    return validationErrors;
+  };
+
+  // Handler para email com validação
+  const handleEmailChange = (e) => {
     const email = e.target.value;
     if (email && !validateEmail(email)) {
-      setErrors(prev => ({ ...prev, email: 'Email inválido' }));
+        setErrors(prev => ({
+            ...prev,
+            email: 'Email inválido'
+        }));
     } else {
-      setErrors(prev => ({ ...prev, email: '' }));
+        setErrors(prev => ({
+            ...prev,
+            email: ''
+        }));
     }
-
-    if (isEditing) {
-      setEditingCompany({ ...editingCompany, email });
-    } else {
-      setNewCompany({ ...newCompany, email });
-    }
+    handleInputChange('email', email);
   };
 
-  // Função para lidar com mudança no website
-  const handleWebsiteChange = (e, isEditing) => {
+  // Handler para website com validação
+  const handleWebsiteChange = (e) => {
     const website = e.target.value;
     if (website && !validateWebsite(website)) {
-      setErrors(prev => ({ ...prev, website: 'Website inválido' }));
+        setErrors(prev => ({
+            ...prev,
+            website: 'Website inválido'
+        }));
     } else {
-      setErrors(prev => ({ ...prev, website: '' }));
+        setErrors(prev => ({
+            ...prev,
+            website: ''
+        }));
     }
-
-    if (isEditing) {
-      setEditingCompany({ ...editingCompany, website });
-    } else {
-      setNewCompany({ ...newCompany, website });
-    }
+    handleInputChange('website', website);
   };
 
   useEffect(() => {
@@ -117,84 +220,153 @@ function CompanyManagement({ buttonColor }) {
     }
   };
 
-  const handleAddCompany = async () => {
-    // Validar antes de enviar
-    if (newCompany.email && !validateEmail(newCompany.email)) {
-      setErrors(prev => ({ ...prev, email: 'Email inválido' }));
-      return;
-    }
-    if (newCompany.website && !validateWebsite(newCompany.website)) {
-      setErrors(prev => ({ ...prev, website: 'Website inválido' }));
-      return;
-    }
-
-    try {
-      const response = await axios.post(`${API_URL}/companies/hierarchy`, {
-        cnpj: newCompany.cnpj,
-        name: newCompany.name,
-        razao_social: newCompany.razao_social,
-        endereco: newCompany.endereco,
-        trade_name: newCompany.trade_name,
-        registration_date: newCompany.registration_date,
-        size: newCompany.size,
-        sector: newCompany.sector,
-        city: newCompany.city,
-        state: newCompany.state,
-        zip_code: newCompany.zip_code,
-        phone: newCompany.phone,
-        email: newCompany.email,
-        website: newCompany.website,
-        is_active: newCompany.is_active
-      });
-      setCompanies([...companies, response.data]);
-      setNewCompany({ 
-        cnpj: '', 
-        name: '', 
-        razao_social: '', 
-        endereco: '', 
-        trade_name: '', 
-        registration_date: '', 
-        size: '', 
-        sector: '', 
-        city: '', 
-        state: '', 
-        zip_code: '', 
-        phone: '', 
-        email: '', 
-        website: '', 
-        is_active: true 
-      });
-      setIsAddingCompany(false);
-    } catch (error) {
-      console.error('Erro ao adicionar empresa:', error);
-      alert(error.response?.data?.detail || 'Erro ao adicionar empresa. Verifique os dados e tente novamente.');
+  // Função genérica para lidar com mudanças nos inputs
+  const handleInputChange = (field, value) => {
+    if (editingCompany) {
+        setEditingCompany(prev => ({
+            ...prev,
+            [field]: value
+        }));
+    } else {
+        setNewCompany(prev => ({
+            ...prev,
+            [field]: value
+        }));
     }
   };
 
-  const handleUpdateCompany = async () => {
+  // Handler específico para CNPJ
+  const handleCNPJChange = (e) => {
+    const formattedValue = formatCNPJ(e.target.value);
+    const numericValue = removeFormat(formattedValue);
+    
+    if (editingCompany) {
+        setEditingCompany(prev => ({
+            ...prev,
+            cnpj: numericValue,
+            cnpj_formatted: formattedValue
+        }));
+    } else {
+        setNewCompany(prev => ({
+            ...prev,
+            cnpj: numericValue,
+            cnpj_formatted: formattedValue
+        }));
+    }
+  };
+
+  // Handler específico para CEP
+  const handleCEPChange = (e) => {
+    const formattedValue = formatCEP(e.target.value);
+    const numericValue = removeFormat(formattedValue);
+    
+    if (editingCompany) {
+        setEditingCompany(prev => ({
+            ...prev,
+            zip_code: numericValue,
+            zip_code_formatted: formattedValue
+        }));
+    } else {
+        setNewCompany(prev => ({
+            ...prev,
+            zip_code: numericValue,
+            zip_code_formatted: formattedValue
+        }));
+    }
+  };
+
+  // Handler específico para telefone
+  const handlePhoneChange = (e) => {
+    const formattedValue = formatPhone(e.target.value);
+    const numericValue = removePhoneFormat(formattedValue);
+    
+    if (editingCompany) {
+        setEditingCompany(prev => ({
+            ...prev,
+            phone: numericValue,
+            phone_formatted: formattedValue
+        }));
+    } else {
+        setNewCompany(prev => ({
+            ...prev,
+            phone: numericValue,
+            phone_formatted: formattedValue
+        }));
+    }
+  };
+
+  // Handler para adicionar empresa com validação
+  const handleAddCompany = async () => {
+    const validationErrors = validateRequiredFields(newCompany);
+    if (validationErrors.length > 0) {
+        setErrors(prev => ({
+            ...prev,
+            validation: validationErrors
+        }));
+        return;
+    }
+
     try {
-      const response = await axios.put(`${API_URL}/companies/${editingCompany.id}`, {
-        cnpj: editingCompany.cnpj,
-        name: editingCompany.name,
-        razao_social: editingCompany.razao_social,
-        endereco: editingCompany.endereco,
-        trade_name: editingCompany.trade_name,
-        registration_date: editingCompany.registration_date,
-        size: editingCompany.size,
-        sector: editingCompany.sector,
-        city: editingCompany.city,
-        state: editingCompany.state,
-        zip_code: editingCompany.zip_code,
-        phone: editingCompany.phone,
-        email: editingCompany.email,
-        website: editingCompany.website,
-        is_active: editingCompany.is_active
-      });
-      setCompanies(companies.map(company => company.id === editingCompany.id ? response.data : company));
-      setEditingCompany(null);
+        // Remove formatação antes de enviar
+        const companyData = {
+            ...newCompany,
+            cnpj: removeFormat(newCompany.cnpj),
+            zip_code: removeFormat(newCompany.zip_code),
+            phone: removePhoneFormat(newCompany.phone)
+        };
+
+        const response = await axios.post(`${API_URL}/companies`, companyData);
+        
+        if (response.status === 201) {
+            setCompanies([...companies, response.data]);
+            setIsAddingCompany(false);
+            setNewCompany({
+                cnpj: '',
+                name: '',
+                razao_social: '',
+                // ... outros campos zerados
+            });
+        }
     } catch (error) {
-      console.error('Erro ao atualizar empresa:', error);
-      alert(error.response?.data?.detail || 'Erro ao atualizar empresa');
+        console.error('Erro ao adicionar empresa:', error);
+    }
+  };
+
+  // Handler para atualizar empresa com validação
+  const handleUpdateCompany = async () => {
+    const validationErrors = validateRequiredFields(editingCompany);
+    if (validationErrors.length > 0) {
+        setErrors(prev => ({
+            ...prev,
+            validation: validationErrors
+        }));
+        return;
+    }
+
+    try {
+        // Remove formatação antes de enviar
+        const companyData = {
+            ...editingCompany,
+            cnpj: removeFormat(editingCompany.cnpj),
+            zip_code: removeFormat(editingCompany.zip_code),
+            phone: removePhoneFormat(editingCompany.phone)
+        };
+
+        const response = await axios.put(
+            `${API_URL}/companies/${editingCompany.id}`,
+            companyData
+        );
+        
+        if (response.status === 200) {
+            setCompanies(
+                companies.map((company) =>
+                    company.id === editingCompany.id ? response.data : company
+                )
+            );
+            setEditingCompany(null);
+        }
+    } catch (error) {
+        console.error('Erro ao atualizar empresa:', error);
     }
   };
 
@@ -261,193 +433,234 @@ function CompanyManagement({ buttonColor }) {
             {editingCompany ? 'Editar Empresa' : 'Adicionar Nova Empresa'}
           </h3>
           
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <input
-              type="text"
-              value={editingCompany ? editingCompany.cnpj : newCompany.cnpj}
-              onChange={(e) => editingCompany 
-                ? setEditingCompany({...editingCompany, cnpj: e.target.value})
-                : setNewCompany({...newCompany, cnpj: e.target.value})}
-              placeholder="CNPJ"
-              className="w-full p-2 border rounded-lg"
-            />
-            <input
-              type="text"
-              value={editingCompany ? editingCompany.name : newCompany.name}
-              onChange={(e) => editingCompany
-                ? setEditingCompany({...editingCompany, name: e.target.value})
-                : setNewCompany({...newCompany, name: e.target.value})}
-              placeholder="Nome da Empresa"
-              className="w-full p-2 border rounded-lg"
-            />
-            <input
-              type="text"
-              value={editingCompany ? editingCompany.razao_social : newCompany.razao_social}
-              onChange={(e) => editingCompany
-                ? setEditingCompany({...editingCompany, razao_social: e.target.value})
-                : setNewCompany({...newCompany, razao_social: e.target.value})}
-              placeholder="Razão Social"
-              className="w-full p-2 border rounded-lg"
-            />
-            <input
-              type="text"
-              value={editingCompany ? editingCompany.endereco : newCompany.endereco}
-              onChange={(e) => editingCompany
-                ? setEditingCompany({...editingCompany, endereco: e.target.value})
-                : setNewCompany({...newCompany, endereco: e.target.value})}
-              placeholder="Endereço"
-              className="w-full p-2 border rounded-lg"
-            />
-            <input
-              type="text"
-              value={editingCompany ? editingCompany.trade_name : newCompany.trade_name}
-              onChange={(e) => editingCompany
-                ? setEditingCompany({...editingCompany, trade_name: e.target.value})
-                : setNewCompany({...newCompany, trade_name: e.target.value})}
-              placeholder="Nome Fantasia"
-              className="w-full p-2 border rounded-lg"
-            />
-            <input
-              type="date"
-              value={editingCompany ? editingCompany.registration_date : newCompany.registration_date}
-              onChange={(e) => editingCompany
-                ? setEditingCompany({...editingCompany, registration_date: e.target.value})
-                : setNewCompany({...newCompany, registration_date: e.target.value})}
-              placeholder="Data de Registro"
-              className="w-full p-2 border rounded-lg"
-            />
-            <select
-              value={editingCompany ? editingCompany.sector : newCompany.sector}
-              onChange={(e) => editingCompany
-                ? setEditingCompany({...editingCompany, sector: e.target.value})
-                : setNewCompany({...newCompany, sector: e.target.value})}
-              className="w-full p-2 border rounded-lg bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-            >
-              <option value="">Selecione o Setor</option>
-              {sectorOptions.map((sector) => (
-                <option key={sector} value={sector}>
-                  {sector}
-                </option>
-              ))}
-            </select>
-            <select
-              value={editingCompany ? editingCompany.size : newCompany.size}
-              onChange={(e) => editingCompany
-                ? setEditingCompany({...editingCompany, size: e.target.value})
-                : setNewCompany({...newCompany, size: e.target.value})}
-              className="w-full p-2 border rounded-lg bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-            >
-              <option value="">Selecione o Tamanho</option>
-              {sizeOptions.map((size) => (
-                <option key={size} value={size}>
-                  {size}
-                </option>
-              ))}
-            </select>
-            <input
-              type="text"
-              value={editingCompany ? editingCompany.city : newCompany.city}
-              onChange={(e) => editingCompany
-                ? setEditingCompany({...editingCompany, city: e.target.value})
-                : setNewCompany({...newCompany, city: e.target.value})}
-              placeholder="Cidade"
-              className="w-full p-2 border rounded-lg"
-            />
-            <input
-              type="text"
-              value={editingCompany ? editingCompany.state : newCompany.state}
-              onChange={(e) => editingCompany
-                ? setEditingCompany({...editingCompany, state: e.target.value})
-                : setNewCompany({...newCompany, state: e.target.value})}
-              placeholder="Estado"
-              className="w-full p-2 border rounded-lg"
-            />
-            <input
-              type="text"
-              value={editingCompany ? editingCompany.zip_code : newCompany.zip_code}
-              onChange={(e) => editingCompany
-                ? setEditingCompany({...editingCompany, zip_code: e.target.value})
-                : setNewCompany({...newCompany, zip_code: e.target.value})}
-              placeholder="CEP"
-              className="w-full p-2 border rounded-lg"
-            />
-            <input
-              type="text"
-              value={editingCompany ? editingCompany.phone : newCompany.phone}
-              onChange={(e) => editingCompany
-                ? setEditingCompany({...editingCompany, phone: e.target.value})
-                : setNewCompany({...newCompany, phone: e.target.value})}
-              placeholder="Telefone"
-              className="w-full p-2 border rounded-lg"
-            />
-            <div className="relative">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <RequiredFieldLabel htmlFor="cnpj">CNPJ</RequiredFieldLabel>
               <input
+                id="cnpj"
+                type="text"
+                value={editingCompany ? editingCompany.cnpj : newCompany.cnpj}
+                onChange={handleCNPJChange}
+                maxLength={18}
+                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
+                placeholder="00.000.000/0000-00"
+              />
+            </div>
+            <div>
+              <RequiredFieldLabel htmlFor="name">Nome da Empresa</RequiredFieldLabel>
+              <input
+                id="name"
+                type="text"
+                value={editingCompany ? editingCompany.name : newCompany.name}
+                onChange={(e) => handleInputChange('name', e.target.value)}
+                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
+              />
+            </div>
+            <div>
+              <RequiredFieldLabel htmlFor="razao_social">Razão Social</RequiredFieldLabel>
+              <input
+                id="razao_social"
+                type="text"
+                value={editingCompany ? editingCompany.razao_social : newCompany.razao_social}
+                onChange={(e) => handleInputChange('razao_social', e.target.value)}
+                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
+              />
+            </div>
+            <div>
+              <label htmlFor="trade_name" className="block text-sm font-medium text-gray-700">
+                Nome Fantasia
+              </label>
+              <input
+                id="trade_name"
+                type="text"
+                value={editingCompany ? editingCompany.trade_name : newCompany.trade_name}
+                onChange={(e) => handleInputChange('trade_name', e.target.value)}
+                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
+              />
+            </div>
+            <div>
+              <label htmlFor="endereco" className="block text-sm font-medium text-gray-700">
+                Endereço
+              </label>
+              <input
+                id="endereco"
+                type="text"
+                value={editingCompany ? editingCompany.endereco : newCompany.endereco}
+                onChange={(e) => handleInputChange('endereco', e.target.value)}
+                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
+              />
+            </div>
+            <div>
+              <label htmlFor="registration_date" className="block text-sm font-medium text-gray-700">
+                Data de Registro
+              </label>
+              <input
+                id="registration_date"
+                type="date"
+                value={editingCompany ? editingCompany.registration_date : newCompany.registration_date}
+                onChange={(e) => handleInputChange('registration_date', e.target.value)}
+                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
+              />
+            </div>
+            <div>
+              <label htmlFor="size" className="block text-sm font-medium text-gray-700">
+                Tamanho
+              </label>
+              <select
+                id="size"
+                value={editingCompany ? editingCompany.size : newCompany.size}
+                onChange={(e) => handleInputChange('size', e.target.value)}
+                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
+              >
+                <option value="">Selecione o tamanho</option>
+                {sizeOptions.map(option => (
+                    <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="sector" className="block text-sm font-medium text-gray-700">
+                Setor
+              </label>
+              <select
+                id="sector"
+                value={editingCompany ? editingCompany.sector : newCompany.sector}
+                onChange={(e) => handleInputChange('sector', e.target.value)}
+                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
+              >
+                <option value="">Selecione o setor</option>
+                {sectorOptions.map(option => (
+                    <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="city" className="block text-sm font-medium text-gray-700">
+                Cidade
+              </label>
+              <input
+                id="city"
+                type="text"
+                value={editingCompany ? editingCompany.city : newCompany.city}
+                onChange={(e) => handleInputChange('city', e.target.value)}
+                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
+              />
+            </div>
+            <div>
+              <label htmlFor="state" className="block text-sm font-medium text-gray-700">
+                Estado
+              </label>
+              <input
+                id="state"
+                type="text"
+                maxLength={2}
+                value={editingCompany ? editingCompany.state : newCompany.state}
+                onChange={(e) => handleInputChange('state', e.target.value.toUpperCase())}
+                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
+                placeholder="UF"
+              />
+            </div>
+            <div>
+              <label htmlFor="zip_code" className="block text-sm font-medium text-gray-700">
+                CEP
+              </label>
+              <input
+                id="zip_code"
+                type="text"
+                value={editingCompany ? editingCompany.zip_code : newCompany.zip_code}
+                onChange={handleCEPChange}
+                maxLength={9}
+                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
+                placeholder="00000-000"
+              />
+            </div>
+            <div>
+              <label htmlFor="phone" className="block text-sm font-medium text-gray-700">
+                Telefone
+              </label>
+              <input
+                id="phone"
+                type="text"
+                value={editingCompany ? 
+                    (editingCompany.phone_formatted || formatPhone(editingCompany.phone)) : 
+                    (newCompany.phone_formatted || formatPhone(newCompany.phone))
+                }
+                onChange={handlePhoneChange}
+                maxLength={15}
+                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
+                placeholder="(00) 00000-0000"
+              />
+            </div>
+            <div>
+              <label htmlFor="email" className="block text-sm font-medium text-gray-700">
+                Email
+              </label>
+              <input
+                id="email"
                 type="email"
                 value={editingCompany ? editingCompany.email : newCompany.email}
-                onChange={(e) => handleEmailChange(e, !!editingCompany)}
-                placeholder="Email"
-                className={`w-full p-2 border rounded-lg ${
-                  errors.email ? 'border-red-500' : 'border-gray-300'
-                } focus:border-blue-500 focus:ring-1 focus:ring-blue-500`}
+                onChange={handleEmailChange}
+                className={`mt-1 block w-full rounded-md shadow-sm ${
+                    errors.email ? 'border-red-500' : 'border-gray-300'
+                }`}
               />
               {errors.email && (
-                <span className="text-red-500 text-sm absolute -bottom-5 left-0">
-                  {errors.email}
-                </span>
+                  <p className="mt-1 text-sm text-red-500">{errors.email}</p>
               )}
             </div>
-            <div className="relative">
+            <div>
+              <label htmlFor="website" className="block text-sm font-medium text-gray-700">
+                Website
+              </label>
               <input
+                id="website"
                 type="url"
                 value={editingCompany ? editingCompany.website : newCompany.website}
-                onChange={(e) => handleWebsiteChange(e, !!editingCompany)}
-                placeholder="Website"
-                className={`w-full p-2 border rounded-lg ${
-                  errors.website ? 'border-red-500' : 'border-gray-300'
-                } focus:border-blue-500 focus:ring-1 focus:ring-blue-500`}
+                onChange={handleWebsiteChange}
+                className={`mt-1 block w-full rounded-md shadow-sm ${
+                    errors.website ? 'border-red-500' : 'border-gray-300'
+                }`}
               />
               {errors.website && (
-                <span className="text-red-500 text-sm absolute -bottom-5 left-0">
-                  {errors.website}
-                </span>
+                  <p className="mt-1 text-sm text-red-500">{errors.website}</p>
               )}
             </div>
-            <div className="mb-2">
-              <label className="inline-flex items-center">
+            <div>
+              <label htmlFor="is_active" className="flex items-center gap-2">
                 <input
+                  id="is_active"
                   type="checkbox"
                   checked={editingCompany ? editingCompany.is_active : newCompany.is_active}
-                  onChange={(e) => editingCompany
-                    ? setEditingCompany({...editingCompany, is_active: e.target.checked})
-                    : setNewCompany({...newCompany, is_active: e.target.checked})}
-                  className="form-checkbox h-5 w-5"
-                  style={{ 
-                    borderColor: buttonColor,
-                    color: buttonColor 
-                  }}
+                  onChange={(e) => handleInputChange('is_active', e.target.checked)}
+                  className="rounded border-gray-300 text-blue-600 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50"
                 />
-                <span className="ml-2 text-gray-700">Ativo</span>
+                <span className="text-sm font-medium text-gray-700">Ativo</span>
               </label>
             </div>
+          </div>
 
-            <div className="col-span-full flex justify-end space-x-2 mt-4">
-              <button
-                onClick={editingCompany ? handleUpdateCompany : handleAddCompany}
-                className="text-white px-6 py-2 rounded-lg hover:opacity-90 transition-all"
-                style={{ backgroundColor: buttonColor }}
-              >
-                {editingCompany ? 'Atualizar' : 'Adicionar'}
-              </button>
-              <button
-                onClick={() => {
-                  setIsAddingCompany(false);
-                  setEditingCompany(null);
-                }}
-                className="bg-red-500 text-white px-6 py-2 rounded-lg hover:opacity-90 transition-all"
-              >
-                Cancelar
-              </button>
-            </div>
+          <div className="flex items-center gap-2 text-sm text-gray-500 mt-6 mb-4">
+            <FaExclamationCircle size={12} className="text-red-500 opacity-40" />
+            <span>Campos obrigatórios</span>
+          </div>
+
+          <div className="flex justify-end gap-2">
+            <button
+              onClick={editingCompany ? handleUpdateCompany : handleAddCompany}
+              className="px-4 py-2 text-white rounded"
+              style={{ backgroundColor: buttonColor }}
+            >
+              {editingCompany ? 'Atualizar' : 'Adicionar'}
+            </button>
+            <button
+              onClick={() => {
+                setIsAddingCompany(false);
+                setEditingCompany(null);
+              }}
+              className="px-4 py-2 bg-red-500 text-white rounded"
+            >
+              Cancelar
+            </button>
           </div>
         </div>
       )}
@@ -498,6 +711,18 @@ function CompanyManagement({ buttonColor }) {
           </tbody>
         </table>
       </div>
+
+      {/* Exibição de erros de validação */}
+      {errors.validation.length > 0 && (
+          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4">
+              <strong className="font-bold">Por favor, corrija os seguintes erros:</strong>
+              <ul className="list-disc list-inside">
+                  {errors.validation.map((error, index) => (
+                      <li key={index}>{error}</li>
+                  ))}
+              </ul>
+          </div>
+      )}
     </div>
   );
 }
