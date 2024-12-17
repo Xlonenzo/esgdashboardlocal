@@ -18,7 +18,9 @@ import {
   TruckIcon,
   Wallet,
   Shield,
-  Link
+  Link,
+  LineChart,
+  Network
 } from 'lucide-react';
 
 const menuItemsData = [
@@ -32,6 +34,7 @@ const menuItemsData = [
       { name: 'Perfis e Usuários', icon: <User size={20} />, path: '/admin/user-management' },
       { name: 'Personalização', icon: <Settings size={20} />, path: '/admin/customization' },
       { name: 'Empresas', icon: <Building size={20} />, path: '/admin/company-management' },
+      { name: 'Configurador IoT', icon: <Network size={20} />, path: '/admin/iot-config' },
     ]
   },
   {
@@ -47,13 +50,25 @@ const menuItemsData = [
   },
   { name: 'KPIs', icon: <FileText size={20} />, path: '/kpi-templates' },
   { name: 'Rastreador de KPI', icon: <Target size={20} />, path: '/kpi-tracker' },
-  { name: 'Gerenciador de Títulos', icon: <FileText size={20} />, path: '/bond-management' },
+  { 
+    name: 'Gerenciador de Títulos', 
+    icon: <FileText size={20} />, 
+    path: '/bonds',
+    subItems: [
+      { name: 'Lista de Títulos', icon: <FileText size={20} />, path: '/bonds/list' },
+      { name: 'Relacionar Projetos', icon: <Link size={20} />, path: '/bonds/relationships' },
+      { name: 'Portfólio ODS', icon: <Target size={20} />, path: '/bonds/portfolio-ods' },
+      { name: 'Relatório de ESG', icon: <LineChart size={20} />, path: '/bonds/sustainability-report' },
+    ]
+  },
   { 
     name: 'Rastreador ESG', 
     icon: <Target size={20} />, 
     path: '/esg-tracker',
     subItems: [
       { name: 'Projetos ESG', icon: <TreePine size={20} />, path: '/esg-tracker/projects' },
+      { name: 'Documentos Ambientais', icon: <FileText size={20} />, path: '/esg-tracker/environmental-documents' },
+      { name: 'Impacto Ambiental', icon: <Leaf size={20} />, path: '/esg-tracker/environmental-impact' },
       { name: 'Dados de Emissão', icon: <Leaf size={20} />, path: '/esg-tracker/emissions' },
       { name: 'Fornecedores', icon: <TruckIcon size={20} />, path: '/esg-tracker/suppliers' },
       { name: 'Materialidade', icon: <BarChart2 size={20} />, path: '/esg-tracker/materiality' },
@@ -62,15 +77,7 @@ const menuItemsData = [
     ] 
   },
   { name: 'Biblioteca de Informações', icon: <Book size={20} />, path: '/info-library' },
-  { name: 'Plano de Ação', icon: <ClipboardList size={20} />, path: '/action-plan' },
-  {
-    name: 'Vínculos',
-    icon: <Link size={20} />,
-    path: '/bonds/projects',
-    subItems: [
-      { name: 'Títulos e Projetos', icon: <Link size={20} />, path: '/bonds/projects' },
-    ]
-  }
+  { name: 'Plano de Ação', icon: <ClipboardList size={20} />, path: '/action-plan' }
 ];
 
 export default menuItemsData;

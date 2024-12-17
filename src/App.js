@@ -21,13 +21,18 @@ import KPITemplate from './components/KPITemplate';
 import KPITracker from './components/KPITracker';
 import Register from './components/Register';
 import BondManagement from './components/BondManagement';
+import BondProjectRelation from './components/BondProjectRelation';
 import EmissionTracking from './components/EmissionTracking';
 import ESGProjects from './components/ESGProjects';
 import Suppliers from './components/Suppliers';
 import Materiality from './components/Materiality';
 import Investment from './components/Investment';
 import Compliance from './components/Compliance';
-import BondProjectRelation from './components/bond/BondProjectRelation';
+import SustainabilityReport from './components/SustainabilityReport';
+import PortfolioODS from './components/PortfolioODS';
+import EnvironmentalDocuments from './components/EnvironmentalDocuments';
+import EnvironmentalImpactStudy from './components/EnvironmentalImpactStudy';
+import IoTConfigDashboard from './components/IoTConfigDashboard';
 
 // Importar dados e estilos
 import articlesData from './data/articles';
@@ -65,6 +70,8 @@ function App() {
   const [kpiTemplates, setKpiTemplates] = useState([]);
   const [kpiEntries, setKpiEntries] = useState([]);
   const [isRegistering, setIsRegistering] = useState(false);
+
+  const [isDarkMode, setIsDarkMode] = useState(false);
 
   useEffect(() => {
     fetchCustomization();
@@ -122,6 +129,11 @@ function App() {
     setUserName(userData.username);
   };
 
+  const handleToggleTheme = () => {
+    setIsDarkMode(!isDarkMode);
+    // Aqui você pode adicionar lógica adicional para mudar cores/temas
+  };
+
   const renderContent = () => {
     switch (activeMenuItem) {
       case '/':
@@ -136,7 +148,12 @@ function App() {
           />
         ) : <UnauthorizedAccess />;
       case '/info-library':
-        return <InfoLibrary articles={articles} setArticles={setArticles} />;
+        return <InfoLibrary 
+          buttonColor={customization.button_color}
+          sidebarColor={customization.sidebar_color}
+          articles={articles} 
+          setArticles={setArticles} 
+        />;
       case '/admin/data-source':
         return userRole === 'admin' ? (
           <DataSourceManagement
@@ -228,8 +245,57 @@ function App() {
             buttonColor={customization.button_color} 
           />
         ) : <UnauthorizedAccess />;
-      case '/bonds/projects':
-        return <BondProjectRelation />;
+      case '/bonds/list':
+        return ['admin', 'editor'].includes(userRole) ? (
+          <BondManagement 
+            sidebarColor={customization.sidebar_color} 
+            buttonColor={customization.button_color} 
+          />
+        ) : <UnauthorizedAccess />;
+      case '/bonds/relationships':
+        return ['admin', 'editor'].includes(userRole) ? (
+          <BondProjectRelation 
+            sidebarColor={customization.sidebar_color} 
+            buttonColor={customization.button_color} 
+          />
+        ) : <UnauthorizedAccess />;
+      case '/bonds/sustainability-report':
+        return ['admin', 'editor'].includes(userRole) ? (
+          <SustainabilityReport 
+            sidebarColor={customization.sidebar_color} 
+            buttonColor={customization.button_color} 
+          />
+        ) : <UnauthorizedAccess />;
+      case '/bonds/portfolio-ods':
+        return ['admin', 'editor'].includes(userRole) ? (
+          <PortfolioODS 
+            sidebarColor={customization.sidebar_color} 
+            buttonColor={customization.button_color} 
+          />
+        ) : <UnauthorizedAccess />;
+
+      case '/esg-tracker/environmental-documents':
+        return ['admin', 'editor'].includes(userRole) ? (
+          <EnvironmentalDocuments 
+            sidebarColor={customization.sidebar_color} 
+            buttonColor={customization.button_color} 
+          />
+        ) : <UnauthorizedAccess />;
+
+      case '/esg-tracker/environmental-impact':
+        return ['admin', 'editor'].includes(userRole) ? (
+          <EnvironmentalImpactStudy 
+            sidebarColor={customization.sidebar_color} 
+            buttonColor={customization.button_color} 
+          />
+        ) : <UnauthorizedAccess />;
+      case '/admin/iot-config':
+        return userRole === 'admin' ? (
+          <IoTConfigDashboard 
+            sidebarColor={customization.sidebar_color} 
+            buttonColor={customization.button_color} 
+          />
+        ) : <UnauthorizedAccess />;
       default:
         return <div>Selecione uma opção do menu</div>;
     }
@@ -252,6 +318,8 @@ function App() {
           fontColor={customization.font_color}
           userName={userName}
           role={userRole}
+          isDarkMode={isDarkMode}
+          onToggleTheme={handleToggleTheme}
         />
 
         <div className="flex h-full">
@@ -274,9 +342,7 @@ function App() {
           />
 
           <main className="flex-1 overflow-y-auto p-8">
-            <h1 className="text-2xl font-bold mb-6" style={{ color: customization.font_color }}>
-              Dashboard ESG
-            </h1>
+          
             {renderContent()}
           </main>
         </div>

@@ -1,11 +1,11 @@
 # main.py
 
-from fastapi import FastAPI, Depends, HTTPException, Query, UploadFile, File, Request, Form
+from fastapi import FastAPI, Depends, HTTPException, Query, UploadFile, File, Request, Form, Body, BackgroundTasks, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
-from typing import List, Optional
+from typing import List, Optional, Dict, Union, AsyncGenerator
 import re
 import shutil
 import os
@@ -15,8 +15,8 @@ from pydantic import BaseModel
 import logging
 from datetime import date, datetime, timezone
 import traceback
-from fastapi.responses import JSONResponse
-from langchain_openai import OpenAIEmbeddings
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
 import chromadb
@@ -31,9 +31,56 @@ import psutil
 from sqlalchemy import func
 from sqlalchemy import text
 from decimal import Decimal
+import json
+import httpx  # Substitua axios por httpx
+from langchain.schema import HumanMessage, SystemMessage
+from langchain.callbacks import AsyncIteratorCallbackHandler
+import asyncio
+import aiofiles  # Adicionar esta linha no início do arquivo com as outras importações
+from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
+from langchain.callbacks.base import BaseCallbackHandler
+from langchain.schema.messages import BaseMessage
+from typing import Any, Dict, List, Optional, Union
 
 from . import models, schemas  # Certifique-se de que o caminho está correto
 from .database import SessionLocal, engine
+from .schemas import ReportRequest, BaseResponse
+
+def get_db():
+    """
+    Função para obter uma sessão do banco de dados.
+    Deve ser usada como dependência nas rotas que precisam acessar o banco.
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+        
+# Queries compartilhadas para ambos os endpoints (mover para o início do arquivo)
+bond_base_query = text("""
+    SELECT 
+        b.id,
+        b.name,
+        b.type,
+        b.value,
+        b.issue_date,
+        b.esg_percentage,
+        b.issuer_cnpj
+    FROM xlonesg.bonds b
+    WHERE b.id = :bond_id
+""")
+
+projects_view_query = text("""
+    SELECT 
+        vw.project_name,
+        vw.ods1, vw.ods2, vw.ods3, vw.ods4, vw.ods5,
+        vw.ods6, vw.ods7, vw.ods8, vw.ods9, vw.ods10,
+        vw.ods11, vw.ods12, vw.ods13, vw.ods14, vw.ods15,
+        vw.ods16, vw.ods17
+    FROM xlonesg.vw_bonds_projects_ods vw
+    WHERE vw.bond_id = :bond_id
+""")
 
 # Configuração de logging
 logging.basicConfig(
@@ -68,45 +115,161 @@ BASE_URL = ""  # Substitua pela URL pública do seu backend
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "chroma_db")
 os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
 
-# Inicializar cliente Chroma com persistência
-chroma_client = chromadb.PersistentClient(
-    path=CHROMA_PERSIST_DIR,
-    settings=Settings(
-        allow_reset=True,
-        is_persistent=True
-    )
-)
-
-# Criar ou obter a collection
-try:
-    collection = chroma_client.get_collection("documents")
-except:
-    collection = chroma_client.create_collection(
-        name="documents",
-        metadata={"hnsw:space": "cosine"}
-    )
-
 # Configuração do OpenAI Embeddings
-# Carrega o .env do diretório backend
-BASE_DIR = Path(__file__).resolve().parent.parent
-env_path = BASE_DIR / '.env'
-load_dotenv(env_path)
-
-# Pega a chave e verifica se está disponível
+load_dotenv()  # Carregar variáveis de ambiente
 api_key = os.getenv('OPENAI_API_KEY')
 if not api_key:
     raise ValueError("OPENAI_API_KEY não encontrada no arquivo .env")
 
-# Usa a chave explicitamente
-embeddings = OpenAIEmbeddings(openai_api_key=api_key)
+embeddings = OpenAIEmbeddings()  # Vai usar automaticamente a variável de ambiente
 
-# Dependency
-def get_db():
-    db = SessionLocal()
+# Criar um wrapper para a função de embedding
+class OpenAIEmbeddingFunction(EmbeddingFunction):
+    def __init__(self, openai_embeddings: OpenAIEmbeddings):
+        self.openai_embeddings = openai_embeddings
+
+    def __call__(self, input: List[str]) -> List[List[float]]:
+        embeddings = self.openai_embeddings.embed_documents(input)
+        return embeddings
+
+# Criar instância da função de embedding
+embedding_function = OpenAIEmbeddingFunction(embeddings)
+
+# Configurações globais do ChromaDB
+CHROMA_SETTINGS = Settings(
+    allow_reset=True,
+    is_persistent=True,
+    anonymized_telemetry=False
+)
+
+def backup_chroma():
+    """
+    Função para realizar backup do ChromaDB
+    """
     try:
-        yield db
-    finally:
-        db.close()
+        logger.info("Iniciando backup do ChromaDB")
+        
+        # Criar diretório de backup se não existir
+        backup_dir = os.path.join(os.getcwd(), 'chroma_backup')
+        os.makedirs(backup_dir, exist_ok=True)
+        
+        # Nome do arquivo de backup com timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_path = os.path.join(backup_dir, f'chroma_backup_{timestamp}')
+        
+        # Realizar backup
+        if os.path.exists(CHROMA_PERSIST_DIR):
+            shutil.copytree(CHROMA_PERSIST_DIR, backup_path)
+            logger.info(f"Backup do ChromaDB realizado com sucesso: {backup_path}")
+            
+            # Manter apenas os últimos 7 backups
+            backups = sorted([d for d in os.listdir(backup_dir) if d.startswith('chroma_backup_')])
+            if len(backups) > 7:
+                for old_backup in backups[:-7]:
+                    old_backup_path = os.path.join(backup_dir, old_backup)
+                    shutil.rmtree(old_backup_path)
+                    logger.info(f"Backup antigo removido: {old_backup}")
+                    
+        else:
+            logger.warning(f"Diretório ChromaDB não encontrado: {CHROMA_PERSIST_DIR}")
+            
+    except Exception as e:
+        logger.error(f"Erro ao realizar backup do ChromaDB: {str(e)}")
+        logger.error(traceback.format_exc())
+
+def run_schedule():
+    """
+    Função para executar o agendador
+    """
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+
+def monitor_chroma_metrics():
+    """Coleta métricas do ChromaDB"""
+    try:
+        metrics = {
+            "total_documents": len(collection.get()["ids"]),
+            "disk_usage": get_dir_size(CHROMA_PERSIST_DIR),
+            "memory_usage": psutil.Process().memory_info().rss / 1024 / 1024,
+            "cpu_percent": psutil.Process().cpu_percent(),
+            "collection_name": collection.name,
+            "metadata": collection.metadata
+        }
+        return metrics
+    except Exception as e:
+        logger.error(f"Erro ao coletar métricas do ChromaDB: {str(e)}")
+        return {}
+
+def get_dir_size(path):
+    """Calcula tamanho total de um diretório em MB"""
+    total = 0
+    with os.scandir(path) as it:
+        for entry in it:
+            if entry.is_file():
+                total += entry.stat().st_size
+            elif entry.is_dir():
+                total += get_dir_size(entry.path)
+    return total / 1024 / 1024  # Converter para MB
+
+def init_chroma():
+    """Inicializa o ChromaDB e cria a collection se necessário"""
+    try:
+        global chroma_client, collection
+        
+        # Limpar qualquer instância existente
+        if os.path.exists(CHROMA_PERSIST_DIR):
+            shutil.rmtree(CHROMA_PERSIST_DIR)
+            logger.info(f"Diretório ChromaDB existente removido: {CHROMA_PERSIST_DIR}")
+        
+        os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
+        
+        # Configurar cliente Chroma com persistência
+        chroma_client = chromadb.PersistentClient(
+            path=CHROMA_PERSIST_DIR,
+            settings=CHROMA_SETTINGS
+        )
+        
+        # Tentar obter collection existente ou criar nova
+        try:
+            collection = chroma_client.get_collection(
+                name="documents",
+                embedding_function=embedding_function
+            )
+            logger.info("Collection 'documents' obtida com sucesso")
+        except Exception:
+            collection = chroma_client.create_collection(
+                name="documents",
+                embedding_function=embedding_function,
+                metadata={"hnsw:space": "cosine"}
+            )
+            logger.info("Nova collection 'documents' criada")
+            
+        return chroma_client, collection
+        
+    except Exception as e:
+        logger.error(f"Erro ao inicializar ChromaDB: {str(e)}")
+        raise e
+
+# Inicialização da aplicação
+try:
+    # Configurar variáveis de ambiente
+    os.environ['ANONYMIZED_TELEMETRY'] = 'False'
+    os.environ['TELEMETRY_ENABLED'] = 'False'
+
+    # Inicializar Chroma
+    chroma_client, collection = init_chroma()
+
+    # Agendar backup diário
+    schedule.every().day.at("00:00").do(backup_chroma)
+
+    # Iniciar scheduler em thread separada
+    scheduler_thread = threading.Thread(target=run_schedule, daemon=True)
+    scheduler_thread.start()
+
+except Exception as e:
+    logger.error(f"Erro ao inicializar ChromaDB: {str(e)}")
+    raise
 
 def validate_cnpj(cnpj: str) -> str:
     # Remove caracteres não numéricos
@@ -283,50 +446,59 @@ def delete_task(task_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/companies/hierarchy", response_model=schemas.Company)
 def add_company_to_hierarchy(company: schemas.CompanyCreate, db: Session = Depends(get_db)):
-    logger.info(f"Dados recebidos no backend: {company.dict()}")  # Log dos dados recebidos
+    logger.info(f"Dados recebidos no backend: {company.dict()}")
     
     try:
-        validated_cnpj = validate_cnpj(company.cnpj)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    
-    # Verifica se a empresa já existe
-    existing_company = db.query(models.Company).filter(models.Company.cnpj == validated_cnpj).first()
-    if existing_company:
-        raise HTTPException(status_code=400, detail="Empresa com este CNPJ já existe")
-    
-    new_company = models.Company(
-        cnpj=validated_cnpj,
-        name=company.name,
-        razao_social=company.razao_social,
-        endereco=company.endereco,
-        trade_name=company.trade_name,
-        registration_date=company.registration_date,
-        size=company.size,
-        sector=company.sector,
-        city=company.city,
-        state=company.state,
-        zip_code=company.zip_code,
-        phone=company.phone,
-        email=company.email,
-        website=company.website,
-        is_active=company.is_active
-    )
-    db.add(new_company)
-    try:
+        # Validar CNPJ
+        validated_cnpj = re.sub(r'\D', '', company.cnpj)
+        if len(validated_cnpj) != 14:
+            raise HTTPException(status_code=422, detail="CNPJ deve conter 14 dígitos")
+
+        # Verificar se a empresa já existe
+        existing_company = db.query(models.Company).filter(models.Company.cnpj == validated_cnpj).first()
+        if existing_company:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"CNPJ {company.cnpj} já está cadastrado para a empresa: {existing_company.name}"
+            )
+
+        # Criar nova empresa
+        new_company = models.Company(
+            cnpj=validated_cnpj,
+            name=company.name,
+            razao_social=company.razao_social,
+            endereco=company.endereco,
+            trade_name=company.trade_name,
+            registration_date=company.registration_date,
+            size=company.size,
+            sector=company.sector,
+            city=company.city,
+            state=company.state,
+            zip_code=company.zip_code,
+            phone=company.phone,
+            email=company.email,
+            website=company.website,
+            is_active=company.is_active if company.is_active is not None else True
+        )
+
+        db.add(new_company)
         db.commit()
         db.refresh(new_company)
-    except SQLAlchemyError as e:
+        return new_company
+
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
         db.rollback()
-        logger.error(f"Erro ao inserir empresa: {str(e)}")
-        raise HTTPException(status_code=400, detail="Erro ao inserir empresa")
-    return schemas.Company.from_orm(new_company)
+        logger.error(f"Erro ao criar empresa: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/companies", response_model=List[schemas.Company])
 def read_companies(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     try:
         companies = db.query(models.Company).offset(skip).limit(limit).all()
         return companies
+        
     except Exception as e:
         logger.error(f"Erro ao buscar empresas: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -413,8 +585,7 @@ def update_company(company_id: int, company: schemas.CompanyCreate, db: Session 
                 logger.error(f"Traceback completo: {traceback.format_exc()}")
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Erro ao atualizar registros: {str(e)}"
-                )
+                    detail=f"Erro ao atualizar registros: {str(e)}")
         else:
             # Se o CNPJ não mudou, apenas atualiza os outros campos
             for key, value in company.dict(exclude_unset=True).items():
@@ -430,9 +601,7 @@ def update_company(company_id: int, company: schemas.CompanyCreate, db: Session 
                 logger.error(f"Erro ao atualizar empresa: {str(e)}")
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Erro ao atualizar empresa: {str(e)}"
-                )
-                
+                    detail=f"Erro ao atualizar empresa: {str(e)}")
     except HTTPException:
         raise
     except Exception as e:
@@ -441,8 +610,7 @@ def update_company(company_id: int, company: schemas.CompanyCreate, db: Session 
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail=f"Erro interno do servidor: {str(e)}"
-        )
+            detail=f"Erro interno do servidor: {str(e)}")
 
 @app.delete("/api/companies/{company_id}", response_model=schemas.Company)
 def delete_company(company_id: int, db: Session = Depends(get_db)):
@@ -565,7 +733,7 @@ def create_kpi_entry(kpi_entry: schemas.KPIEntryCreate, db: Session = Depends(ge
                 raise HTTPException(
                     status_code=404,
                     detail="Projeto não encontrado"
-                )  # Fechando o parêntese aqui
+                )
 
         db_kpi_entry = models.KPIEntry(**kpi_entry.dict())
         db.add(db_kpi_entry)
@@ -575,11 +743,10 @@ def create_kpi_entry(kpi_entry: schemas.KPIEntryCreate, db: Session = Depends(ge
 
     except SQLAlchemyError as e:
         db.rollback()
-        logger.error(f"Erro ao criar entrada de KPI: {str(e)}")
+        logger.error(f"Erro ao criar entrada de KPI: {str(e)}")  # Este é um comentário
         raise HTTPException(
             status_code=400,
-            detail=f"Erro ao criar entrada de KPI: {str(e)}"
-        )  # Fechando o parêntese aqui
+            detail=f"Erro ao criar entrada de KPI: {str(e)}")
 
 @app.put("/api/kpi-entries/{kpi_entry_id}", response_model=schemas.KPIEntry)
 def update_kpi_entry(kpi_entry_id: int, kpi_entry: schemas.KPIEntryCreate, db: Session = Depends(get_db)):
@@ -787,6 +954,9 @@ async def update_customization(
         logger.error(f"Erro ao atualizar customização: {str(e)}")
         db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Erro ao atualizar customização: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Rotas para Upload de Logo
 
@@ -861,7 +1031,7 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
     hashed_password = get_password_hash(user.password)
-    db_user = models.User(username=user.username, email=user.email, hashed_password=hashed_password, role=user.role)
+    db_user = models.User(username=user.username, email=user.email, hashed_password=hashed_password, role=user.role, full_name=user.full_name)
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
@@ -894,8 +1064,7 @@ def list_users(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
         logger.error(traceback.format_exc())  # Log do stack trace completo
         raise HTTPException(
             status_code=500, 
-            detail=f"Erro interno ao buscar usuários: {str(e)}"
-        )
+            detail=f"Erro interno ao buscar usuários: {str(e)}")
 
 @app.get("/api/users/{user_id}", response_model=schemas.User)
 def get_user(
@@ -953,12 +1122,32 @@ def update_user(
 
 @app.delete("/api/users/{user_id}", response_model=schemas.User)
 def delete_user(user_id: int, db: Session = Depends(get_db)):
-    db_user = db.query(models.User).filter(models.User.id == user_id).first()
-    if db_user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    db.delete(db_user)
-    db.commit()
-    return schemas.User.from_orm(db_user)
+    try:
+        db_user = db.query(models.User).filter(models.User.id == user_id).first()
+        if db_user is None:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado")
+        
+        # Armazenar os dados do usuário antes de deletar
+        user_data = {
+            "id": db_user.id,
+            "username": db_user.username,
+            "email": db_user.email,
+            "role": db_user.role,
+            "is_active": db_user.is_active,
+            "full_name": db_user.full_name or ''  # Garantir que não seja None
+        }
+        
+        # Deletar o usuário
+        db.delete(db_user)
+        db.commit()
+        
+        # Retornar os dados usando from_orm
+        return schemas.User(**user_data)
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Erro ao deletar usuário: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Rotas para Bonds (Títulos)
 
@@ -1058,7 +1247,7 @@ def create_minimal_bond(bond: schemas.BondCreate, db: Session = Depends(get_db))
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Falha ao criar título mínimo: {str(e)}")
 
-# Inicialização da aplicação
+# Inicializaão da aplicação
 
 if __name__ == "__main__":
     logger.info("Iniciando a aplicação...")
@@ -1109,86 +1298,119 @@ def list_users(
         raise HTTPException(status_code=500, detail=str(e))
 
 # Configurar Chroma e OpenAI Embeddings
-client = chromadb.Client()
-collection = client.create_collection("documents")
 embeddings = OpenAIEmbeddings(
     openai_api_key=os.getenv("OPENAI_API_KEY"),
     model="text-embedding-ada-002"  # Especificar o modelo
 )
 
 # Rota para upload de documentos com processamento
-@app.post("/api/documents/upload")
+@app.post("/api/generic-documents", response_model=schemas.GenericDocumentResponse)
 async def upload_document(
     file: UploadFile = File(...),
-    title: str = Form(...),
+    entity_name: str = Form(...),
+    entity_id: str = Form(...),
+    description: Optional[str] = Form(None),
+    document_type: Optional[str] = Form(None),
+    reference_date: Optional[str] = Form(None),
+    uploaded_by: str = Form('sistema'),
     db: Session = Depends(get_db)
 ):
-    file_path = None
+    """Upload de novo documento"""
     try:
-        # Verificar extensão do arquivo
-        file_ext = os.path.splitext(file.filename)[1]
-        file_type = file_ext.replace('.', '') if file_ext else ''
+        logger.info(f"Iniciando upload para {entity_name} {entity_id}")
         
-        if file_type.lower() not in ['pdf', 'txt', 'docx']:
+        # Validar entity_id
+        try:
+            entity_id_int = int(entity_id)
+        except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"Tipo de arquivo não suportado: {file_type}"
-            )  # <-- Adicionado o parêntese de fechamento
-            
+                detail="entity_id deve ser um número inteiro"
+            )
+
+        # Validar extensão do arquivo
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        ALLOWED_EXTENSIONS = {'.pdf', '.doc', '.docx', '.xls', '.xlsx'}
+        
+        if file_ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tipo de arquivo não permitido. Permitidos: {', '.join(ALLOWED_EXTENSIONS)}")
+
         # Gerar nome único para o arquivo
-        unique_filename = f"{uuid4()}{file_ext}"
-        file_path = os.path.join(UPLOAD_DIR, unique_filename)
-        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        unique_filename = f"{timestamp}_{entity_name}_{entity_id_int}{file_ext}"
+        file_path = Path(UPLOAD_DIR) / unique_filename
+
+        # Criar diretório se não existir
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+
         # Salvar arquivo
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # Processar documento e gerar embeddings
-        if file_type.lower() in ['pdf', 'txt', 'docx']:
-            # Processamento específico para cada tipo de arquivo
-            # ... resto do código de processamento ...
-            
-            return {
-                "message": "Documento processado com sucesso",
-                "document_id": document.id
-            }
-        else:
-            raise ValueError(f"Tipo de arquivo não suportado: {file_type}")
-            
+        try:
+            async with aiofiles.open(file_path, 'wb') as buffer:
+                content = await file.read()
+                await buffer.write(content)
+        except Exception as e:
+            logger.error(f"Erro ao salvar arquivo: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro ao salvar arquivo: {str(e)}")
+
+        try:
+            # Converter reference_date se fornecido
+            parsed_reference_date = None
+            if reference_date:
+                try:
+                    parsed_reference_date = datetime.strptime(reference_date, '%Y-%m-%d').date()
+                except ValueError:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Formato de data inválido. Use YYYY-MM-DD"
+                    )
+
+            # Criar registro no banco
+            document = models.GenericDocument(
+                entity_name=entity_name,
+                entity_id=entity_id_int,
+                filename=unique_filename,
+                original_filename=file.filename,
+                file_type=file_ext.lstrip('.'),
+                file_size=os.path.getsize(file_path),
+                mime_type=file.content_type,
+                description=description,
+                document_type=document_type,
+                reference_date=parsed_reference_date,
+                uploaded_by=uploaded_by,
+                upload_date=datetime.now(timezone.utc)
+            )
+
+            db.add(document)
+            db.commit()
+            db.refresh(document)
+
+            logger.info(f"Documento {document.id} salvo com sucesso")
+            return document
+
+        except SQLAlchemyError as db_error:
+            # Se falhar no banco, remover o arquivo
+            if file_path.exists():
+                file_path.unlink()
+            logger.error(f"Erro no banco de dados: {str(db_error)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro ao salvar no banco de dados: {str(db_error)}")
+
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
-        logger.error(f"Erro no upload: {str(e)}")
+        # Limpar arquivo se existir
+        if 'file_path' in locals() and file_path.exists():
+            file_path.unlink()
+        logger.error(f"Erro inesperado no upload: {str(e)}")
+        logger.error(traceback.format_exc())
         raise HTTPException(
             status_code=500,
-            detail=f"Erro no processamento do documento: {str(e)}"  # <-- Adicionado o parêntese de fechamento
-        )
-    except SQLAlchemyError as e:
-        logger.error(f"Erro de banco de dados: {str(e)}")
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
-        raise HTTPException(
-            status_code=500,
-            detail="Erro ao salvar documento no banco de dados"
-        )
-        
-    except IOError as e:
-        logger.error(f"Erro de I/O: {str(e)}")
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
-        raise HTTPException(
-            status_code=500,
-            detail="Erro ao processar arquivo"
-        )
-        
-    except Exception as e:
-        logger.error(f"Erro inesperado: {str(e)}")
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
-        raise HTTPException(
-            status_code=500,
-            detail="Erro interno do servidor"
-        )
+            detail=f"Erro inesperado: {str(e)}")
 
 @app.get("/api/documents/search")
 def search_documents_advanced(
@@ -1234,8 +1456,7 @@ def search_documents_advanced(
         logger.error(f"Erro na busca: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail="Erro ao realizar a busca"
-        )
+            detail="Erro ao realizar a busca")
 
 @app.get("/api/search")
 def search_documents(
@@ -1259,12 +1480,54 @@ async def list_documents(db: Session = Depends(get_db)):
     return documents
 
 # Rota para download de documentos
-@app.get("/api/documents/{document_id}/download")
-async def download_document(document_id: int, db: Session = Depends(get_db)):
-    document = db.query(models.Document).filter(models.Document.id == document_id).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Documento não encontrado")
-    return FileResponse(document.file_path)
+@app.get("/api/generic-documents/download/{document_id}")
+async def download_document(
+    document_id: int,
+    db: Session = Depends(get_db)
+):
+    """Download de um documento específico"""
+    try:
+        # Buscar documento no banco
+        document = db.query(models.GenericDocument).filter(
+            models.GenericDocument.id == document_id
+        ).first()
+        
+        if not document:
+            raise HTTPException(status_code=404, detail="Documento não encontrado")
+        
+        # Construir caminho do arquivo
+        file_path = Path(UPLOAD_DIR) / document.filename
+        
+        # Verificar se arquivo existe
+        if not file_path.exists():
+            logger.error(f"Arquivo não encontrado: {file_path}")
+            raise HTTPException(
+                status_code=404, 
+                detail="Arquivo não encontrado no servidor")
+        
+        # Determinar o tipo MIME
+        mime_type = document.mime_type or 'application/octet-stream'
+        
+        # Log do download
+        logger.info(f"Iniciando download do documento {document_id}: {document.original_filename}")
+        
+        return FileResponse(
+            path=str(file_path),  # Converter Path para string
+            filename=document.original_filename,
+            media_type=mime_type,
+            headers={
+                "Content-Disposition": f"attachment; filename={document.original_filename}"
+            }
+        )
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Erro ao fazer download do documento {document_id}: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao fazer download do documento: {str(e)}")
 
 def validate_file(file: UploadFile) -> bool:
     # Lista de extensões permitidas
@@ -1275,8 +1538,7 @@ def validate_file(file: UploadFile) -> bool:
     if file_ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail="Tipo de arquivo não permitido"
-        )
+            detail="Tipo de arquivo não permitido")
     
     # Verificar tamanho (exemplo: máximo 10MB)
     MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB em bytes
@@ -1286,8 +1548,7 @@ def validate_file(file: UploadFile) -> bool:
     if file_size > MAX_FILE_SIZE:
         raise HTTPException(
             status_code=400,
-            detail="Arquivo muito grande (máximo 10MB)"
-        )
+            detail="Arquivo muito grande (máximo 10MB)")
     
     return True
 
@@ -1337,15 +1598,6 @@ def process_document(file_path: str, file_ext: str):
     
     return text_splitter.split_documents(documents)
 
-# Criar um wrapper para a função de embedding
-class OpenAIEmbeddingFunction(EmbeddingFunction):
-    def __init__(self, openai_embeddings: OpenAIEmbeddings):
-        self.openai_embeddings = openai_embeddings
-
-    def __call__(self, input: List[str]) -> List[List[float]]:
-        embeddings = self.openai_embeddings.embed_documents(input)
-        return embeddings
-
 def safe_remove_db(db_path: str, max_attempts: int = 5, wait_time: int = 1):
     """Tenta remover o diretório do banco de dados de forma segura"""
     for attempt in range(max_attempts):
@@ -1372,104 +1624,19 @@ def safe_remove_db(db_path: str, max_attempts: int = 5, wait_time: int = 1):
             time.sleep(wait_time)
     return False
 
-def init_chroma():
-    # Configurações simplificadas
-    settings = Settings(
-        anonymized_telemetry=False,  # Apenas esta configuração para telemetria
-        allow_reset=True,
-        is_persistent=True
-    )
-    
-    # Usar um diretório com timestamp
-    db_path = f"chroma_db_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    
-    try:
-        # Inicializar OpenAI Embeddings
-        openai_embeddings = OpenAIEmbeddings(openai_api_key=os.getenv('OPENAI_API_KEY'))
-        
-        # Criar a função de embedding
-        embedding_function = OpenAIEmbeddingFunction(openai_embeddings)
-        
-        # Inicializar Chroma
-        chroma_client = chromadb.PersistentClient(path=db_path)
-        
-        collection = chroma_client.get_or_create_collection(
-            name="documents",
-            embedding_function=embedding_function
-        )
-        
-        return chroma_client, collection
-        
-    except Exception as e:
-        print(f"Erro ao inicializar Chroma: {e}")
-        raise
-
-# Você também pode adicionar estas variáveis de ambiente antes de importar o chromadb
-os.environ['ANONYMIZED_TELEMETRY'] = 'False'
-os.environ['TELEMETRY_ENABLED'] = 'False'
-
-# Inicializar Chroma
-chroma_client, collection = init_chroma()
-
-def backup_chroma():
-    """Realiza backup do Chroma DB"""
-    try:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = f"backups/chroma/backup_{timestamp}"
-        
-        # Criar diretório de backup
-        os.makedirs(backup_path, exist_ok=True)
-        
-        # Copiar arquivos do Chroma
-        shutil.copytree(
-            "chroma_db",
-            f"{backup_path}/chroma_db",
-            dirs_exist_ok=True
-        )
-        
-        # Limpar backups antigos (manter últimos 5)
-        backups = sorted(os.listdir("backups/chroma"))
-        if len(backups) > 5:
-            for old_backup in backups[:-5]:
-                shutil.rmtree(f"backups/chroma/{old_backup}")
-                
-        logger.info(f"Backup do Chroma DB realizado: {backup_path}")
-    except Exception as e:
-        logger.error(f"Erro ao realizar backup: {str(e)}")
-
-# Agendar backup diário
-schedule.every().day.at("00:00").do(backup_chroma)
-
-def run_schedule():
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
-
-# Iniciar agendador em thread separada
-threading.Thread(target=run_schedule, daemon=True).start()
-
-def monitor_chroma_metrics():
-    """Monitora métricas do Chroma DB"""
-    try:
-        # Tamanho do diretório
-        total_size = 0
-        for dirpath, dirnames, filenames in os.walk("chroma_db"):
-            for f in filenames:
-                fp = os.path.join(dirpath, f)
-                total_size += os.path.getsize(fp)
-        
-        # Métricas da collection
-        collection_stats = {
-            "count": collection.count(),
-            "size_mb": total_size / (1024 * 1024),
-            "timestamp": datetime.now().isoformat()
+@app.get("/api/admin/chroma-metrics")
+async def get_chroma_metrics():
+    """Endpoint para obter métricas do ChromaDB"""
+    metrics = monitor_chroma_metrics()
+    if metrics:
+        return {
+            "status": "success",
+            "data": metrics
         }
-        
-        logger.info(f"Métricas Chroma DB: {collection_stats}")
-        return collection_stats
-    except Exception as e:
-        logger.error(f"Erro ao monitorar métricas: {str(e)}")
-        return None
+    return {
+        "status": "error",
+        "message": "Erro ao obter métricas"
+    }
 
 @app.get("/api/admin/chroma-metrics")
 async def get_chroma_metrics(db: Session = Depends(get_db)):
@@ -1518,7 +1685,7 @@ async def get_esg_project(
     try:
         project = db.query(models.ESGProject).filter(models.ESGProject.id == project_id).first()
         if not project:
-            raise HTTPException(status_code=404, detail="Projeto não encontrado")
+            raise HTTPException(status_code=404, detail="Projeto no encontrado")
         return project
     except Exception as e:
         logger.error(f"Erro ao buscar projeto ESG: {str(e)}")
@@ -1622,42 +1789,40 @@ def read_projects(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)
     try:
         logger.info("Iniciando busca de projetos...")
         
-        # Verificar se há projetos no banco
-        total_projects = db.query(models.ProjectTracking).count()
-        logger.info(f"Total de projetos no banco: {total_projects}")
-        
-        # Buscar projetos com relacionamentos (apenas company)
         projects = db.query(models.ProjectTracking)\
-            .options(
-                joinedload(models.ProjectTracking.company)  # Removido o joinedload de bonds
-            )\
+            .options(joinedload(models.ProjectTracking.company))\
             .offset(skip)\
             .limit(limit)\
             .all()
         
-        logger.info(f"Projetos encontrados: {len(projects)}")
-        
-        # Log detalhado de cada projeto
+        # Adicionar log para verificar os ODS
         for project in projects:
             logger.info(f"""
-                Projeto encontrado:
-                ID: {project.id}
-                Nome: {project.name}
-                Empresa: {project.company_id}
-                Tipo: {project.project_type}
-                Status: {project.status}
-                Orçamento: {project.budget_allocated}
+                Projeto ID {project.id} - ODS:
+                ods1: {project.ods1},
+                ods2: {project.ods2},
+                ods3: {project.ods3},
+                ods4: {project.ods4},
+                ods5: {project.ods5},
+                ods6: {project.ods6},
+                ods7: {project.ods7},
+                ods8: {project.ods8},
+                ods9: {project.ods9},
+                ods10: {project.ods10},
+                ods11: {project.ods11},
+                ods12: {project.ods12},
+                ods13: {project.ods13},
+                ods14: {project.ods14},
+                ods15: {project.ods15},
+                ods16: {project.ods16},
+                ods17: {project.ods17}
             """)
         
         return projects
         
     except Exception as e:
         logger.error(f"Erro ao buscar projetos: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Erro interno ao buscar projetos: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/project-tracking/{project_id}", response_model=schemas.ProjectTracking)
 def read_project(project_id: int, db: Session = Depends(get_db)):
@@ -1688,25 +1853,14 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
 @app.post("/api/emissions", response_model=schemas.EmissionData)
 def create_emission(emission: schemas.EmissionDataCreate, db: Session = Depends(get_db)):
     try:
-        logger.info(f"Criando nova emissão: {emission.dict()}")
+        logger.info("Criando novo registro de emisso")
         
-        # Criar o objeto com apenas os campos necessários
-        emission_dict = {
-            'company_id': emission.company_id,
-            'scope': emission.scope,
-            'emission_type': emission.emission_type,
-            'value': emission.value,
-            'unit': emission.unit,
-            'source': emission.source,
-            'calculation_method': emission.calculation_method,
-            'uncertainty_level': emission.uncertainty_level,
-            'timestamp': emission.timestamp,
-            'calculated_emission': emission.calculated_emission,
-            'reporting_standard': emission.reporting_standard
-        }
-        
-        db_emission = models.EmissionData(**emission_dict)
-        
+        # Verificar se o projeto existe
+        project = db.query(models.ProjectTracking).filter(models.ProjectTracking.id == emission.project_id).first()
+        if not project:
+            raise HTTPException(status_code=404, detail="Projeto não encontrado")
+            
+        db_emission = models.EmissionData(**emission.dict())
         db.add(db_emission)
         db.commit()
         db.refresh(db_emission)
@@ -1715,85 +1869,125 @@ def create_emission(emission: schemas.EmissionDataCreate, db: Session = Depends(
         return db_emission
         
     except Exception as e:
-        db.rollback()
         logger.error(f"Erro ao criar emissão: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=400, detail=str(e))
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/emissions", response_model=List[schemas.EmissionData])
-def read_emissions(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+async def read_emissions(db: Session = Depends(get_db)):
     try:
-        emissions = db.query(models.EmissionData)\
-            .options(joinedload(models.EmissionData.company))\
-            .offset(skip)\
-            .limit(limit)\
-            .all()
-        return emissions
+        logger.info("Iniciando busca de emissões")
+        
+        # Verificar se a tabela existe
+        try:
+            db.execute(text("SELECT 1 FROM xlonesg.emission_data LIMIT 1"))
+            logger.info("Tabela emission_data existe")
+        except SQLAlchemyError as e:
+            logger.error(f"Erro ao verificar tabela: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail="Tabela de emissões não encontrada. Verifique se a migração foi executada.")
+        
+        # Tentar buscar os dados
+        try:
+            emissions = (
+                db.query(models.EmissionData)
+                .order_by(models.EmissionData.timestamp.desc())
+                .all()
+            )
+            logger.info(f"Encontradas {len(emissions)} emissões")
+            
+            # Log para debug
+            for emission in emissions:
+                logger.debug(f"Emissão ID {emission.id}: {emission.emission_type}")
+            
+            return emissions
+            
+        except SQLAlchemyError as e:
+            logger.error(f"Erro ao consultar dados: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro ao consultar dados: {str(e)}")
+            
     except Exception as e:
-        logger.error(f"Erro ao buscar emissões: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/emissions/{emission_id}", response_model=schemas.EmissionData)
-def read_emission(emission_id: int, db: Session = Depends(get_db)):
-    try:
-        db_emission = db.query(models.EmissionData).filter(models.EmissionData.id == emission_id).first()
-        if db_emission is None:
-            raise HTTPException(status_code=404, detail="Registro de emissão não encontrado")
-        return db_emission
-    except Exception as e:
-        logger.error(f"Erro ao buscar emissão: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Erro não esperado: {str(e)}")
+        logger.error(f"Traceback completo: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro interno do servidor: {str(e)}")
 
 @app.put("/api/emissions/{emission_id}", response_model=schemas.EmissionData)
-def update_emission(emission_id: int, emission: schemas.EmissionDataCreate, db: Session = Depends(get_db)):
+def update_emission(
+    emission_id: int,
+    emission: schemas.EmissionDataCreate,
+    db: Session = Depends(get_db)
+):
     try:
+        logger.info(f"Atualizando emissão ID {emission_id}")
         db_emission = db.query(models.EmissionData).filter(models.EmissionData.id == emission_id).first()
-        if db_emission is None:
-            raise HTTPException(status_code=404, detail="Registro de emissão não encontrado")
-        
-        # Atualiza os campos
-        for key, value in emission.dict(exclude_unset=True).items():
-            if hasattr(db_emission, key):
-                setattr(db_emission, key, value)
-        
-        # O updated_at será atualizado automaticamente pelo onupdate
+        if not db_emission:
+            raise HTTPException(status_code=404, detail="Emissão não encontrada")
+            
+        for key, value in emission.dict().items():
+            setattr(db_emission, key, value)
+            
         db.commit()
         db.refresh(db_emission)
         return db_emission
-        
     except Exception as e:
         db.rollback()
         logger.error(f"Erro ao atualizar emissão: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.delete("/api/emissions/{emission_id}", response_model=schemas.EmissionData)
-def delete_emission(emission_id: int, db: Session = Depends(get_db)):
+@app.delete("/api/emissions/{emission_id}")
+def delete_emission(
+    emission_id: int,
+    db: Session = Depends(get_db)
+):
     try:
+        logger.info(f"Removendo emissão ID {emission_id}")
         db_emission = db.query(models.EmissionData).filter(models.EmissionData.id == emission_id).first()
-        if db_emission is None:
-            raise HTTPException(status_code=404, detail="Registro de emissão não encontrado")
-        
+        if not db_emission:
+            raise HTTPException(status_code=404, detail="Emissão não encontrada")
+            
         db.delete(db_emission)
         db.commit()
-        return db_emission
+        return {"message": "Emissão removida com sucesso"}
     except Exception as e:
         db.rollback()
-        logger.error(f"Erro ao deletar emissão: {str(e)}")
+        logger.error(f"Erro ao remover emissão: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
+
+# Rota para buscar emissões por projeto
+@app.get("/api/emissions/project/{project_id}", response_model=List[schemas.EmissionData])
+async def read_emissions_by_project(project_id: int, db: Session = Depends(get_db)):
+    try:
+        emissions = (
+            db.query(models.EmissionData)  # Usando EmissionData
+            .filter(models.EmissionData.project_id == project_id)
+            .all()
+        )
+        return emissions
+    except Exception as e:
+        logger.error(f"Erro ao buscar emissões do projeto: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Rotas para Fornecedores
 
 @app.post("/api/suppliers", response_model=schemas.Supplier)
 async def create_supplier(supplier: schemas.SupplierCreate, db: Session = Depends(get_db)):
-    logger.info("Iniciando criaço de fornecedor")
+    logger.info("Iniciando criação de fornecedor")
     logger.info(f"Dados recebidos: {supplier.dict()}")
     
     try:
-        # Verifica se a empresa existe
-        company = db.query(models.Company).filter(models.Company.id == supplier.company_id).first()
-        if not company:
-            logger.error(f"Empresa {supplier.company_id} não encontrada")
-            raise HTTPException(status_code=404, detail="Empresa não encontrada")
+        # Verifica se o projeto existe
+        project = db.query(models.ProjectTracking).filter(
+            models.ProjectTracking.id == supplier.project_id
+        ).first()
+        if not project:
+            logger.error(f"Projeto {supplier.project_id} não encontrado")
+            raise HTTPException(status_code=404, detail="Projeto não encontrado")
 
         db_supplier = models.Supplier(**supplier.dict())
         db.add(db_supplier)
@@ -1823,48 +2017,64 @@ def read_suppliers(skip: int = 0, limit: int = 100, db: Session = Depends(get_db
 
 @app.get("/api/suppliers/{supplier_id}", response_model=schemas.Supplier)
 def read_supplier(supplier_id: int, db: Session = Depends(get_db)):
-    db_supplier = db.query(models.Supplier).filter(models.Supplier.id == supplier_id).first()
-    if db_supplier is None:
-        raise HTTPException(status_code=404, detail="Fornecedor não encontrado")
-    return schemas.Supplier.from_orm(db_supplier)
+    try:
+        supplier = db.query(models.Supplier).filter(models.Supplier.id == supplier_id).first()
+        if not supplier:
+            raise HTTPException(status_code=404, detail="Fornecedor não encontrado")
+        return supplier
+    except Exception as e:
+        logger.error(f"Erro ao buscar fornecedor: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/suppliers/{supplier_id}", response_model=schemas.Supplier)
-def update_supplier(supplier_id: int, supplier: schemas.SupplierCreate, db: Session = Depends(get_db)):
-    db_supplier = db.query(models.Supplier).filter(models.Supplier.id == supplier_id).first()
-    if db_supplier is None:
-        raise HTTPException(status_code=404, detail="Fornecedor não encontrado")
-    
-    supplier_data = supplier.dict(exclude_unset=True)
-    for key, value in supplier_data.items():
-        setattr(db_supplier, key, value)
-    
+async def update_supplier(
+    supplier_id: int,
+    supplier: schemas.SupplierUpdate,
+    db: Session = Depends(get_db)
+):
     try:
+        # Busca o fornecedor existente
+        db_supplier = db.query(models.Supplier).filter(
+            models.Supplier.id == supplier_id
+        ).first()
+        
+        if not db_supplier:
+            raise HTTPException(status_code=404, detail="Fornecedor não encontrado")
+
+        # Verifica se o projeto existe
+        project = db.query(models.ProjectTracking).filter(
+            models.ProjectTracking.id == supplier.project_id
+        ).first()
+        if not project:
+            raise HTTPException(status_code=404, detail="Projeto não encontrado")
+
+        # Atualiza os campos
+        for key, value in supplier.dict().items():
+            setattr(db_supplier, key, value)
+
         db.commit()
         db.refresh(db_supplier)
-        logger.info(f"Fornecedor atualizado com sucesso: {db_supplier.id}")
-        return schemas.Supplier.from_orm(db_supplier)
+        return db_supplier
+
     except Exception as e:
         db.rollback()
         logger.error(f"Erro ao atualizar fornecedor: {str(e)}")
-        raise HTTPException(
-            status_code=400,
-            detail=f"Erro ao atualizar fornecedor: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.delete("/api/suppliers/{supplier_id}", response_model=schemas.Supplier)
+@app.delete("/api/suppliers/{supplier_id}")
 def delete_supplier(supplier_id: int, db: Session = Depends(get_db)):
-    db_supplier = db.query(models.Supplier).filter(models.Supplier.id == supplier_id).first()
-    if db_supplier is None:
-        raise HTTPException(status_code=404, detail="Fornecedor não encontrado")
     try:
-        db.delete(db_supplier)
+        supplier = db.query(models.Supplier).filter(models.Supplier.id == supplier_id).first()
+        if not supplier:
+            raise HTTPException(status_code=404, detail="Fornecedor não encontrado")
+        
+        db.delete(supplier)
         db.commit()
-        logger.info(f"Fornecedor deletado com sucesso: {supplier_id}")
-        return schemas.Supplier.from_orm(db_supplier)
-    except SQLAlchemyError as e:
-        logger.error(f"Erro ao deletar fornecedor: {str(e)}")
+        return {"message": "Fornecedor deletado com sucesso"}
+    except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=400, detail=f"Falha ao deletar fornecedor: {str(e)}")
+        logger.error(f"Erro ao deletar fornecedor: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 async def root():
@@ -1881,10 +2091,13 @@ async def create_supplier(
 ):
     logger.info(f"Recebendo requisição POST /api/suppliers: {supplier.dict()}")
     try:
-        company = db.query(models.Company).filter(models.Company.id == supplier.company_id).first()
-        if not company:
-            logger.error(f"Empresa {supplier.company_id} não encontrada")
-            raise HTTPException(status_code=404, detail="Empresa não encontrada")
+        # Verifica se o projeto existe
+        project = db.query(models.ProjectTracking).filter(
+            models.ProjectTracking.id == supplier.project_id
+        ).first()
+        if not project:
+            logger.error(f"Projeto {supplier.project_id} não encontrado")
+            raise HTTPException(status_code=404, detail="Projeto não encontrado")
 
         db_supplier = models.Supplier(**supplier.dict())
         db.add(db_supplier)
@@ -1901,43 +2114,38 @@ async def create_supplier(
 
 # Rotas para Avaliação de Materialidade
 @app.post("/api/materiality", response_model=schemas.MaterialityAssessment)
-def create_materiality(materiality: schemas.MaterialityAssessmentCreate, db: Session = Depends(get_db)):
+def create_materiality(
+    materiality: schemas.MaterialityAssessmentCreate, 
+    db: Session = Depends(get_db)
+):
     try:
-        logger.info(f"Criando nova avaliação de materialidade: {materiality.dict()}")
-        
         db_materiality = models.MaterialityAssessment(**materiality.dict())
-        db_materiality.last_updated = datetime.now(timezone.utc)  # Definir timezone
-        
         db.add(db_materiality)
         db.commit()
         db.refresh(db_materiality)
-        
-        logger.info(f"Avaliação de materialidade criada com sucesso: ID {db_materiality.id}")
         return db_materiality
-        
-    except Exception as e:
+    except SQLAlchemyError as e:
         db.rollback()
-        logger.error(f"Erro ao criar avaliação de materialidade: {str(e)}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error creating materiality: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/materiality", response_model=List[schemas.MaterialityAssessment])
 def read_materiality(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     try:
         materiality_list = db.query(models.MaterialityAssessment)\
-            .options(joinedload(models.MaterialityAssessment.company))\
+            .options(joinedload(models.MaterialityAssessment.project))\
             .offset(skip)\
             .limit(limit)\
             .all()
         return materiality_list
     except Exception as e:
-        logger.error(f"Erro ao buscar avaliações de materialidade: {str(e)}")
+        logger.error(f"Error fetching materiality: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/materiality/{materiality_id}", response_model=schemas.MaterialityAssessment)
 def read_materiality_by_id(materiality_id: int, db: Session = Depends(get_db)):
     db_materiality = db.query(models.MaterialityAssessment)\
-        .options(joinedload(models.MaterialityAssessment.company))\
+        .options(joinedload(models.MaterialityAssessment.project))\
         .filter(models.MaterialityAssessment.id == materiality_id)\
         .first()
     
@@ -1984,8 +2192,7 @@ def delete_materiality(materiality_id: int, db: Session = Depends(get_db)):
             logger.error(f"Avaliação de materialidade não encontrada: ID {materiality_id}")
             raise HTTPException(
                 status_code=404, 
-                detail=f"Avaliação de materialidade com ID {materiality_id} não encontrada"
-            )
+                detail=f"Avaliação de materialidade com ID {materiality_id} não encontrada")
         
         # Se existe, deletamos
         try:
@@ -1996,7 +2203,7 @@ def delete_materiality(materiality_id: int, db: Session = Depends(get_db)):
             
         except Exception as e:
             db.rollback()
-            logger.error(f"Erro ao deletar avaliação de materialidade: {str(e)}")
+            logger.error(f"Erro ao deletar avaliaç����o de materialidade: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
             
     except HTTPException as he:
@@ -2153,9 +2360,7 @@ def create_compliance_audit(
                 "corrective_action_plan": compliance.corrective_action_plan,
                 "follow_up_date": compliance.follow_up_date,
                 "created_at": row[1],
-                "updated_at": row[2]
-            }
-            
+                "updated_at": row[2]}
     except Exception as e:
         db.rollback()
         logger.error(f"Erro ao criar auditoria de compliance: {str(e)}")
@@ -2244,88 +2449,1610 @@ async def upload_file(file: UploadFile = File(...)):
         logger.error(f"Erro no upload: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.get("/api/bonds/{bond_id}/projects")
-def get_bond_projects(bond_id: int, db: Session = Depends(get_db)):
+@app.get("/api/bond-project-relations", response_model=List[schemas.BondProjectRelation])
+def get_relationships(db: Session = Depends(get_db)):
     try:
-        # Buscar o título com seus projetos relacionados
-        bond = db.query(models.Bond)\
-            .options(joinedload(models.Bond.projects))\
-            .filter(models.Bond.id == bond_id)\
-            .first()
-            
-        if not bond:
-            raise HTTPException(status_code=404, detail="Título não encontrado")
-            
-        return bond.projects
+        logger.info("Buscando relações entre títulos e projetos...")
+        relations = db.query(models.BondProjectRelation)\
+            .options(joinedload(models.BondProjectRelation.bond))\
+            .options(joinedload(models.BondProjectRelation.project))\
+            .all()
         
+        logger.info(f"Encontradas {len(relations)} relações")
+        return relations
     except Exception as e:
-        logger.error(f"Erro ao buscar projetos do título: {str(e)}")
+        logger.error(f"Erro ao buscar relações: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/bonds/{bond_id}/projects")
-def relate_bond_projects(bond_id: int, data: dict, db: Session = Depends(get_db)):
+@app.post("/api/bonds/relationships")
+async def create_relationship(request: Request, db: Session = Depends(get_db)):
     try:
-        # Verificar se o título existe
-        bond = db.query(models.Bond).filter(models.Bond.id == bond_id).first()
-        if not bond:
-            raise HTTPException(status_code=404, detail="Título não encontrado")
+        form_data = await request.form()
+        bond_id = int(form_data.get('bond_id'))
+        project_id = int(form_data.get('project_id'))
         
-        project_ids = data.get('project_ids', [])
+        logger.info(f"Dados recebidos - bond_id: {bond_id}, project_id: {project_id}")
         
-        # Verificar se todos os projetos existem
-        projects = db.query(models.ProjectTracking)\
-            .filter(models.ProjectTracking.id.in_(project_ids))\
-            .all()
-        if len(projects) != len(project_ids):
-            raise HTTPException(status_code=404, detail="Um ou mais projetos não encontrados")
+        # Verificar se o relacionamento já existe
+        existing = db.query(models.BondProjectRelation).filter_by(
+            bond_id=bond_id,
+            project_id=project_id
+        ).first()
         
-        # Remover relações existentes
-        db.query(models.BondProjectRelation)\
-            .filter(models.BondProjectRelation.bond_id == bond_id)\
-            .delete()
-        
-        # Criar novas relações
-        for project_id in project_ids:
-            relation = models.BondProjectRelation(
-                bond_id=bond_id,
-                project_id=project_id,
-                created_by="system"
+        if existing:
+            raise HTTPException(
+                status_code=400,
+                detail="Relacionamento já existe"
             )
-            db.add(relation)
         
+        # Criar novo relacionamento
+        relation = models.BondProjectRelation(
+            bond_id=bond_id,
+            project_id=project_id
+        )
+        
+        db.add(relation)
         db.commit()
-        return {"message": "Relações atualizadas com sucesso"}
+        
+        logger.info(f"Novo relacionamento criado: bond_id={bond_id}, project_id={project_id}")
+        return {"message": "Relacionamento criado com sucesso"}
     
+    except ValueError as e:
+        db.rollback()
+        logger.error(f"Erro de validação: {str(e)}")
+        raise HTTPException(
+            status_code=422,
+            detail="Dados inválidos")
     except Exception as e:
         db.rollback()
-        logger.error(f"Erro ao relacionar projetos ao título: {str(e)}")
+        logger.error(f"Erro ao criar relacionamento: {str(e)}")
+        raise HTTPException(
+            status_code=400,
+            detail=str(e))
+
+@app.delete("/api/bonds/relationships/{relation_id}")
+def delete_relationship(relation_id: int, db: Session = Depends(get_db)):
+    try:
+        relation = db.query(models.BondProjectRelation)\
+            .filter_by(id=relation_id)\
+            .first()
+        if not relation:
+            raise HTTPException(status_code=404, detail="Relacionamento não encontrado")
+        
+        db.delete(relation)
+        db.commit()
+        return {"message": "Relacionamento removido com sucesso"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Erro ao deletar relacionamento: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/bonds/relationships")
-def get_all_relationships(db: Session = Depends(get_db)):
+# Modelo para a requisição de geração de relatório
+class ReportRequest(BaseModel):
+    bond_id: int
+    report_type: str = 'complete'  # default para manter compatibilidade
+
+    class Config:
+        from_attributes = True  # Para compatibilidade com SQLAlchemy
+
+async def fetch_document_details(bond_name: str, db: Session) -> List[dict]:
+    """Busca documentos relacionados a um título específico"""
+    logger.info(f"Buscando documentos para o título: {bond_name}")
+    
     try:
-        # Buscar todas as relações com informações dos títulos e projetos
-        relations = db.query(models.BondProjectRelation)\
-            .options(
-                joinedload(models.BondProjectRelation.bond),
-                joinedload(models.BondProjectRelation.project)
-            )\
-            .all()
+        # Buscar no ChromaDB
+        results = collection.get(
+            where={"bond_name": bond_name}
+        )
+        
+        if not results or not results['documents']:
+            logger.warning(f"Nenhum documento encontrado para {bond_name}")
+            return []
             
-        relationships = {}
-        for relation in relations:
-            if relation.bond_id not in relationships:
-                relationships[relation.bond_id] = []
-            relationships[relation.bond_id].append({
-                "project_id": relation.project_id,
-                "created_at": relation.created_at,
-                "created_by": relation.created_by
-            })
-            
-        return relationships
+        documents = []
+        for idx, doc in enumerate(results['documents']):
+            try:
+                metadata = results['metadatas'][idx] if results['metadatas'] else {}
+                
+                # Limitar o tamanho do conteúdo para evitar tokens excessivos
+                content = doc[:1000] + "..." if len(doc) > 1000 else doc
+                
+                documents.append({
+                    "title": metadata.get('title', 'Sem título'),
+                    "content": content,
+                    "type": metadata.get('document_type', 'Não especificado')
+                })
+                
+            except Exception as doc_error:
+                logger.error(f"Erro ao processar documento {idx}: {str(doc_error)}")
+                continue
+                
+        return documents
         
     except Exception as e:
-        logger.error(f"Erro ao buscar relacionamentos: {str(e)}")
+        logger.error(f"Erro ao buscar documentos: {str(e)}")
+        logger.error(traceback.format_exc())
+        return []
+
+@app.get("/api/documents/details")
+async def get_document_details(bond_name: str, db: Session = Depends(get_db)):
+    return await fetch_document_details(bond_name, db)
+
+# Adicionar no início do arquivo, junto com as outras importações
+from .constants import (
+    ODS_GRI_IFC_MAPPING,
+    IFC_PERFORMANCE_STANDARDS,
+    get_complete_mapping,
+    get_gri_indicators_for_ods,
+    get_ifc_standards_for_ods,
+    get_ifc_descriptions_for_ods
+)
+
+# Definir uma classe personalizada para callback
+class CustomAsyncCallbackHandler(BaseCallbackHandler):
+    """Callback handler for streaming LLM responses."""
+    
+    def __init__(self):
+        self.queue = asyncio.Queue()
+        self.is_cancelled = False
+        
+    async def on_llm_new_token(self, token: str, **kwargs) -> None:
+        """Run on new LLM token. Only available when streaming is enabled."""
+        if not self.is_cancelled:
+            await self.queue.put(token)
+        
+    async def on_llm_end(self, *args, **kwargs) -> None:
+        """Run when LLM ends running."""
+        await self.queue.put(None)
+        
+    async def on_llm_error(self, error: Exception, **kwargs) -> None:
+        """Run when LLM errors."""
+        await self.queue.put(f"[ERRO] {str(error)}")
+        
+    def cancel(self):
+        """Cancel the streaming."""
+        self.is_cancelled = True
+        asyncio.create_task(self.queue.put("[CANCELADO]"))
+        
+    def on_chat_model_start(self, *args, **kwargs) -> None:
+        """Run when chat model starts."""
+        pass
+        
+    async def aiter(self):
+        """Async iterator for getting tokens."""
+        while True:
+            if self.is_cancelled:
+                break
+            token = await self.queue.get()
+            if token in [None, "[CANCELADO]"]:
+                break
+            yield token
+            self.queue.task_done()
+
+@app.post("/api/generate-report/stream/complete") 
+async def generate_report_stream(request: ReportRequest, db: Session = Depends(get_db)):
+    async def generate():
+        try:
+            logger.info(f"[DEBUG] Iniciando geração do relatório para bond_id: {request.bond_id}")
+            start_time = time.time()
+            callback_handler = CustomAsyncCallbackHandler()
+            buffer = ""
+
+            # Buscar dados do título
+            bond = db.query(models.Bond).filter(models.Bond.id == request.bond_id).first()
+            if not bond:
+                raise HTTPException(status_code=404, detail="Título não encontrado")
+
+            # Buscar projetos e ODS relacionados
+            projects = db.execute(projects_view_query, {"bond_id": bond.id}).fetchall()
+            
+            # Formatar análise de ODS com seus relacionamentos
+            ods_analysis = []
+            for project in projects:
+                ods_numbers = [i for i in range(1, 18) if getattr(project, f'ods{i}', False)]
+                for ods in ods_numbers:
+                    ods_code = f"ODS{ods}"
+                    mapping = get_complete_mapping(ods_code)
+                    
+                    ods_analysis.append(f"""
+                    {mapping['name']} (ODS {ods}) - Projeto {project.project_name}:
+                    - Indicadores GRI: {', '.join(mapping['gri_indicators'])}
+                    - Padrões IFC: {', '.join(mapping['ifc_standards'])}
+                    - Aspectos IFC: {', '.join(mapping['ifc_descriptions'])}
+                    """)
+
+            prompt = f"""
+            Como analista especializado em títulos verdes e sustentáveis, gere um sumário executivo 
+            conciso e objetivo do título, abordando os seguintes aspectos:
+
+            DADOS DO TÍTULO:
+            - Nome: {bond.name}
+            - Tipo: {bond.type}
+            - Valor: {bond.value}
+            - Percentual ESG: {bond.esg_percentage}%
+            - Data de Emissão: {bond.issue_date}
+
+            ANÁLISE DE ODS E FRAMEWORKS:
+            {chr(10).join(ods_analysis)}
+
+            O sumário executivo deve incluir:
+
+            1. VISÃO GERAL FINANCEIRA
+            - Análise do valor e condições financeiras do título
+            - Avaliação do percentual ESG e sua relevância
+            - Indicadores financeiros chave
+
+            2. IMPACTO ESG E FRAMEWORKS
+            - Análise dos ODS impactados e seus indicadores GRI
+            - Alinhamento com padrões IFC
+            - Benefícios ambientais e sociais esperados
+
+            3. CONCLUSÃO
+            - Pontos fortes do título
+            - Principais desafios e oportunidades
+            - Recomendação geral
+            """
+
+            messages = [
+                SystemMessage(content="Você é um analista especializado em títulos verdes e sustentáveis, com profundo conhecimento em análise financeira e frameworks ESG."),
+                HumanMessage(content=prompt)
+            ]
+            
+            # Configurar o modelo para o relatório completo
+            chat_model_streaming = ChatOpenAI(
+                model="gpt-3.5-turbo-16k",
+                streaming=True,
+                temperature=0.5,
+                max_tokens=2000,
+                request_timeout=120,
+                callbacks=[callback_handler],
+                openai_api_key=os.getenv('OPENAI_API_KEY')
+            )
+            
+            # Gerar o relatório usando o modelo
+            task = asyncio.create_task(chat_model_streaming.agenerate([messages]))
+            
+            # Streaming da resposta
+            async for token in callback_handler.aiter():
+                if isinstance(token, str):
+                    buffer += token
+                    if len(buffer) >= 100:
+                        yield f"data: {buffer}\n\n"
+                        buffer = ""
+                await asyncio.sleep(0.005)
+
+            if buffer:
+                yield f"data: {buffer}\n\n"
+
+            # Aguardar a conclusão da tarefa
+            await task
+            elapsed_time = time.time() - start_time
+            logger.info(f"[DEBUG] Relatório concluído em {elapsed_time:.2f} segundos")
+            
+            yield "data: [FIM]\n\n"
+
+        except Exception as e:
+            logger.error(f"[DEBUG] Erro na geração: {str(e)}")
+            logger.error(f"[DEBUG] Traceback: {traceback.format_exc()}")
+            yield f"data: [ERRO] {str(e)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "X-Handler-ID": str(uuid4())
+        }
+    )
+
+# Inicialização da aplicação
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+@app.get("/api/generic-documents/{entity_name}/{entity_id}", response_model=List[schemas.GenericDocumentResponse])
+async def list_entity_documents(
+    entity_name: str,
+    entity_id: int,
+    db: Session = Depends(get_db)
+):
+    """Lista todos os documentos de uma entidade específica"""
+    documents = db.query(models.GenericDocument).filter(
+        models.GenericDocument.entity_name == entity_name,
+        models.GenericDocument.entity_id == entity_id
+    ).order_by(models.GenericDocument.upload_date.desc()).all()
+    
+    return documents
+
+@app.delete("/api/generic-documents/{document_id}")
+async def delete_document(document_id: int, db: Session = Depends(get_db)):
+    """Remove um documento"""
+    document = db.query(models.GenericDocument).filter(
+        models.GenericDocument.id == document_id
+    ).first()
+    
+    if not document:
+        raise HTTPException(status_code=404, detail="Documento não encontrado")
+    
+    # Remover arquivo físico
+    file_path = Path("uploads") / document.filename
+    try:
+        if file_path.exists():
+            file_path.unlink()
+    except Exception as e:
+        logger.error(f"Erro ao remover arquivo: {str(e)}")
+    
+    # Remover registro do banco
+    db.delete(document)
+    db.commit()
+    
+    return {"message": "Documento removido com sucesso"}
+
+@app.post("/api/environmental-documents", response_model=schemas.EnvironmentalDocument)
+async def create_environmental_document(
+    document: schemas.EnvironmentalDocumentCreate,
+    db: Session = Depends(get_db)
+):
+    try:
+        db_document = models.EnvironmentalDocument(**document.dict())
+        db.add(db_document)
+        db.commit()
+        db.refresh(db_document)
+        return db_document
+    except Exception as e:
+        logger.error(f"Erro ao criar documento ambiental: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/api/environmental-documents", response_model=List[schemas.EnvironmentalDocument])
+async def list_environmental_documents(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    documents = db.query(models.EnvironmentalDocument)\
+        .order_by(models.EnvironmentalDocument.creation_date.desc())\
+        .offset(skip).limit(limit).all()
+    return documents
+
+@app.get("/api/environmental-documents/{document_id}", response_model=schemas.EnvironmentalDocument)
+async def get_environmental_document(document_id: int, db: Session = Depends(get_db)):
+    document = db.query(models.EnvironmentalDocument)\
+        .filter(models.EnvironmentalDocument.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Documento não encontrado")
+    return document
+
+@app.put("/api/environmental-documents/{document_id}", response_model=schemas.EnvironmentalDocument)
+async def update_environmental_document(
+    document_id: int,
+    document: schemas.EnvironmentalDocumentCreate,
+    db: Session = Depends(get_db)
+):
+    db_document = db.query(models.EnvironmentalDocument)\
+        .filter(models.EnvironmentalDocument.id == document_id).first()
+    if not db_document:
+        raise HTTPException(status_code=404, detail="Documento não encontrado")
+    
+    for key, value in document.dict(exclude_unset=True).items():
+        setattr(db_document, key, value)
+    
+    db.commit()
+    db.refresh(db_document)
+    return db_document
+
+@app.delete("/api/environmental-documents/{document_id}")
+async def delete_environmental_document(document_id: int, db: Session = Depends(get_db)):
+    document = db.query(models.EnvironmentalDocument)\
+        .filter(models.EnvironmentalDocument.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Documento não encontrado")
+    
+    db.delete(document)
+    db.commit()
+    return {"message": "Documento deletado com sucesso"}
+
+# Rotas para Estudos de Impacto Ambiental
+@app.post("/api/environmental-impact-studies", response_model=schemas.EnvironmentalImpactStudy)
+async def create_impact_study(study: schemas.EnvironmentalImpactStudyCreate, db: Session = Depends(get_db)):
+    logger.info(f"Criando novo estudo de impacto ambiental: {study.dict()}")
+    try:
+        # Verificar se o documento ambiental existe
+        document = db.query(models.EnvironmentalDocument).filter(
+            models.EnvironmentalDocument.id == study.environmental_documentid  # Corrigido aqui
+        ).first()
+        if not document:
+            raise HTTPException(
+                status_code=404, 
+                detail="Documento ambiental não encontrado"
+            )
+
+        db_study = models.EnvironmentalImpactStudy(**study.dict())
+        db.add(db_study)
+        db.commit()
+        db.refresh(db_study)
+        
+        logger.info(f"Estudo de impacto criado com sucesso: ID {db_study.id}")
+        return db_study
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Erro ao criar estudo de impacto: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/api/environmental-impact-studies", response_model=List[schemas.EnvironmentalImpactStudy])
+async def read_impact_studies(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    try:
+        studies = db.query(models.EnvironmentalImpactStudy)\
+            .options(joinedload(models.EnvironmentalImpactStudy.environmental_document))\
+            .offset(skip)\
+            .limit(limit)\
+            .all()
+        return studies
+    except Exception as e:
+        logger.error(f"Erro ao buscar estudos de impacto: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/environmental-impact-studies/{study_id}", response_model=schemas.EnvironmentalImpactStudy)
+async def read_impact_study(study_id: int, db: Session = Depends(get_db)):
+    try:
+        study = db.query(models.EnvironmentalImpactStudy)\
+            .options(joinedload(models.EnvironmentalImpactStudy.environmental_document))\
+            .filter(models.EnvironmentalImpactStudy.id == study_id)\
+            .first()
+        if not study:
+            raise HTTPException(status_code=404, detail="Estudo não encontrado")
+        return study
+    except Exception as e:
+        logger.error(f"Erro ao buscar estudo de impacto: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/environmental-impact-studies/{study_id}", response_model=schemas.EnvironmentalImpactStudy)
+async def update_impact_study(
+    study_id: int, 
+    study: schemas.EnvironmentalImpactStudyCreate, 
+    db: Session = Depends(get_db)
+):
+    try:
+        db_study = db.query(models.EnvironmentalImpactStudy)\
+            .filter(models.EnvironmentalImpactStudy.id == study_id)\
+            .first()
+        if not db_study:
+            raise HTTPException(status_code=404, detail="Estudo não encontrado")
+
+        # Verificar se o documento ambiental existe
+        if study.environmental_documentid:
+            document = db.query(models.EnvironmentalDocument)\
+                .filter(models.EnvironmentalDocument.id == study.environmental_documentid)\
+                .first()
+            if not document:
+                raise HTTPException(
+                    status_code=404, 
+                    detail="Documento ambiental não encontrado"
+                )
+
+        # Atualizar os campos
+        for key, value in study.dict().items():
+            setattr(db_study, key, value)
+
+        db_study.updated_at = func.now()  # Atualizar o timestamp
+        db.commit()
+        db.refresh(db_study)
+        return db_study
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Erro ao atualizar estudo de impacto: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.delete("/api/environmental-impact-studies/{study_id}")
+async def delete_impact_study(study_id: int, db: Session = Depends(get_db)):
+    try:
+        db_study = db.query(models.EnvironmentalImpactStudy)\
+            .filter(models.EnvironmentalImpactStudy.id == study_id)\
+            .first()
+        if not db_study:
+            raise HTTPException(status_code=404, detail="Estudo não encontrado")
+
+        db.delete(db_study)
+        db.commit()
+        return {"message": "Estudo excluído com sucesso"}
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Erro ao excluir estudo de impacto: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+# Adicionar o modelo de request se ainda não existir
+class DescriptionValidationRequest(BaseModel):
+    text: str
+    required_aspects: List[str]  
+
+# Corrigir o caminho do endpoint (note o hífen em vez de underline)
+@app.post("/api/environmental-impact-study/validate-description", tags=["Environmental Impact Study"])
+async def validate_environmental_impact_study_description(
+    request: DescriptionValidationRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Valida a descrição de um estudo de impacto ambiental usando LLM.
+    """
+    try:
+        logger.info("=== Iniciando validação de descrição de estudo de impacto ===")
+        logger.info(f"Texto para análise: {request.text[:100]}...")
+        
+        prompt = f"""
+        Como especialista em análise de documentação ambiental, avalie a seguinte descrição 
+        de atividade e verifique se ela contém informações adequadas sobre todos os aspectos requeridos.
+        
+        Descrição a ser analisada:
+        {request.text}
+        
+        Aspectos que devem estar presentes na descrição:
+        {', '.join(request.required_aspects)}
+        
+        Por favor, analise o texto e forneça:
+        1. Se cada aspecto está presente ou ausente
+        2. Para aspectos presentes, indique onde no texto a informação foi encontrada
+        3. Para aspectos ausentes, sugira o que deveria ser incluído
+        
+        Responda em formato JSON com a seguinte estrutura:
+        {{
+            "isValid": boolean,
+            "missingAspects": ["aspecto1", "aspecto2"],
+            "analysis": {{
+                "aspecto1": {{
+                    "present": boolean,
+                    "location": "trecho do texto ou null",
+                    "suggestion": "sugestão de melhoria ou null"
+                }}
+            }}
+        }}
+        """
+
+        messages = [
+            SystemMessage(content="Você é um especialista em análise de documentação ambiental, "
+                                "com vasto conhecimento em estudos de impacto ambiental e licenciamento."),
+            HumanMessage(content=prompt)
+        ]
+        
+        chat_model_streaming = ChatOpenAI(
+            model="gpt-3.5-turbo-16k",  # Bom para resumos, mais rápido e mais barato
+            streaming=True,
+            temperature=0.5,  # Menor temperatura para maior consistência
+            max_tokens=2000,
+            request_timeout=120,
+            callbacks=[callback_handler],
+            openai_api_key=os.getenv('OPENAI_API_KEY')
+        )
+        
+        # Use the model
+        response = chat_model_streaming.agenerate([messages])
+        result = json.loads(response.generations[0][0].text)
+        
+        logger.info("=== Resultado da validação ===")
+        logger.info(f"Válido: {result['isValid']}")
+        if not result['isValid']:
+            logger.info(f"Aspectos faltantes: {result['missingAspects']}")
+
+        return result
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Erro ao decodificar resposta do LLM: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail="Erro ao processar resposta da validação"
+        )
+    except Exception as e:
+        logger.error(f"Erro na validação: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Erro ao validar descrição: {str(e)}")
+
+@app.post("/api/generate-report/stream/summary") 
+async def generate_summary_report_stream(
+    request: ReportRequest,
+    db: Session = Depends(get_db)
+):
+    request_id = str(uuid4())
+    callback_handler = CustomAsyncCallbackHandler()
+    active_streams[request_id] = callback_handler
+    start_time = time.time()
+
+    # Configuração para sumário
+    chat_model_streaming = ChatOpenAI(
+        model="gpt-3.5-turbo-16k",
+        streaming=True,
+        temperature=0.5,
+        max_tokens=2000,
+        request_timeout=120,
+        callbacks=[callback_handler],
+        openai_api_key=os.getenv('OPENAI_API_KEY')
+    )
+
+    async def generate():
+        try:
+            bond = db.query(models.Bond).filter(models.Bond.id == request.bond_id).first()
+            if not bond:
+                yield "data: [ERRO] Título não encontrado\n\n"
+                return
+
+            yield "data: Iniciando análise do título\n\n"
+            await asyncio.sleep(0.5)
+
+            # Buscar projetos e ODS relacionados
+            projects = db.execute(projects_view_query, {"bond_id": bond.id}).fetchall()
+            
+            # Formatar análise de ODS com seus relacionamentos
+            ods_analysis = []
+            for project in projects:
+                ods_numbers = [i for i in range(1, 18) if getattr(project, f'ods{i}', False)]
+                for ods in ods_numbers:
+                    ods_code = f"ODS{ods}"
+                    mapping = get_complete_mapping(ods_code)
+                    
+                    ods_analysis.append(f"""
+                    {mapping['name']} (ODS {ods}) - Projeto {project.project_name}:
+                    - Indicadores GRI: {', '.join(mapping['gri_indicators'])}
+                    - Padrões IFC: {', '.join(mapping['ifc_standards'])}
+                    - Aspectos IFC: {', '.join(mapping['ifc_descriptions'])}
+                    """)
+
+            prompt = f"""
+            Como analista especializado em títulos verdes e sustentáveis, gere um sumário executivo 
+            conciso e objetivo do título, abordando os seguintes aspectos:
+
+            DADOS DO TÍTULO:
+            - Nome: {bond.name}
+            - Tipo: {bond.type}
+            - Valor: {bond.value}
+            - Percentual ESG: {bond.esg_percentage}%
+            - Data de Emissão: {bond.issue_date}
+
+            ANÁLISE DE ODS E FRAMEWORKS:
+            {chr(10).join(ods_analysis)}
+
+            O sumário executivo deve incluir:
+
+             VISÃO GERAL FINANCEIRA
+            - Análise do valor e condições financeiras do título
+            - Avaliação do percentual ESG e sua relevância
+            - Indicadores financeiros chave
+
+             IMPACTO ESG E FRAMEWORKS
+            - Análise dos ODS impactados e seus indicadores GRI
+            - Alinhamento com padrões IFC
+            - Benefícios ambientais e sociais esperados
+
+             CONCLUSÃO
+            - Pontos fortes do título
+            - Principais desafios e oportunidades
+            - Recomendação geral
+            """
+
+            messages = [
+                SystemMessage(content="Você é um analista especializado em títulos verdes e sustentáveis, com profundo conhecimento em análise financeira e frameworks ESG."),
+                HumanMessage(content=prompt)
+            ]
+
+            task = asyncio.create_task(chat_model_streaming.agenerate([messages]))
+            
+            buffer = ""
+            async for token in callback_handler.aiter():
+                if callback_handler.is_cancelled:
+                    yield "data: [CANCELADO]\n\n"
+                    break
+                
+                buffer += token
+                if len(buffer) >= 30 or "\n\n" in buffer:
+                    yield f"data: {buffer}\n\n"
+                    buffer = ""
+                
+                await asyncio.sleep(0.005)
+
+            if buffer:
+                yield f"data: {buffer}\n\n"
+
+            if not callback_handler.is_cancelled:
+                elapsed_time = time.time() - start_time
+                yield f"data: \n\nRelatório concluído em {elapsed_time:.2f} segundos\n\n"
+                yield "data: [FIM]\n\n"
+
+        except Exception as e:
+            logger.error(f"[DEBUG] Erro na geração do sumário: {str(e)}")
+            yield f"data: [ERRO] {str(e)}\n\n"
+        finally:
+            if request_id in active_streams:
+                del active_streams[request_id]
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"X-Handler-ID": request_id}
+    )
+
+@app.post("/api/generate-report/stream/complete")
+async def generate_complete_report_stream(
+    request: ReportRequest,
+    db: Session = Depends(get_db)
+):
+    request_id = str(uuid4())
+    callback_handler = CustomAsyncCallbackHandler()
+    active_streams[request_id] = callback_handler
+    start_time = time.time()
+
+    chat_model_streaming = ChatOpenAI(
+        model="gpt-4-turbo-preview",
+        streaming=True,
+        temperature=0.7,
+        max_tokens=4000,
+        request_timeout=180,
+        callbacks=[callback_handler],
+        openai_api_key=os.getenv('OPENAI_API_KEY')
+    )
+
+    async def generate():
+        try:
+            bond = db.query(models.Bond).filter(models.Bond.id == request.bond_id).first()
+            if not bond:
+                yield "data: [ERRO] Título não encontrado\n\n"
+                return
+
+            yield "data: Iniciando análise detalhada do título\n\n"
+            await asyncio.sleep(0.5)
+
+            # Buscar projetos e ODS relacionados
+            projects = db.execute(projects_view_query, {"bond_id": bond.id}).fetchall()
+            documents = await fetch_document_details(bond.name, db)
+            
+            # Formatar análise detalhada de ODS com frameworks
+            ods_analysis = []
+            for project in projects:
+                ods_numbers = [i for i in range(1, 18) if getattr(project, f'ods{i}', False)]
+                for ods in ods_numbers:
+                    ods_code = f"ODS{ods}"
+                    mapping = get_complete_mapping(ods_code)
+                    
+                    ifc_details = []
+                    for std in mapping['ifc_standards']:
+                        ifc_details.append(f"{std}: {IFC_PERFORMANCE_STANDARDS[std]}")
+                    
+                    ods_analysis.append(f"""
+                    {mapping['name']} (ODS {ods}) - Projeto {project.project_name}:
+                    
+                    Indicadores GRI Aplicáveis:
+                    {chr(10).join([f"- {indicator}" for indicator in mapping['gri_indicators']])}
+                    
+                    Padrões IFC Relacionados:
+                    {chr(10).join([f"- {detail}" for detail in ifc_details])}
+                    
+                    Aspectos de Implementação:
+                    {chr(10).join([f"- {desc}" for desc in mapping['ifc_descriptions']])}
+                    """)
+
+            prompt = f"""
+            Analise os dados do título verde/sustentável e gere um relatório detalhado seguindo a estrutura abaixo.
+
+            DADOS DO TÍTULO:
+            - Nome: {bond.name}
+            - Tipo: {bond.type}
+            - Valor: {bond.value}
+            - Percentual ESG: {bond.esg_percentage}%
+            - Data de Emissão: {bond.issue_date}
+
+            ANÁLISE DETALHADA DE ODS E FRAMEWORKS:
+            {chr(10).join(ods_analysis)}
+
+            DOCUMENTAÇÃO RELACIONADA:
+            {chr(10).join(f"- {doc['title']}: {doc['type']}" for doc in documents)}
+
+            Estruture o relatório nas seguintes seções:
+
+             ANÁLISE FINANCEIRA E DE MERCADO
+             ANÁLISE DE IMPACTO AMBIENTAL
+             ANÁLISE DE IMPACTO SOCIAL
+             GOVERNANÇA E COMPLIANCE
+             ALINHAMENTO COM FRAMEWORKS
+             RECOMENDAÇÕES E CONCLUSÕES
+            """
+
+            messages = [
+                SystemMessage(content="Você é um especialista em análise de títulos verdes e sustentáveis, com profundo conhecimento em frameworks ESG, análise financeira e padrões internacionais de sustentabilidade."),
+                HumanMessage(content=prompt)
+            ]
+
+            task = asyncio.create_task(chat_model_streaming.agenerate([messages]))
+            
+            # Streaming da resposta
+            buffer = ""
+            async for token in callback_handler.aiter():
+                if callback_handler.is_cancelled:
+                    yield "data: [CANCELADO]\n\n"
+                    break
+                
+                buffer += token
+                if len(buffer) >= 30 or "\n\n" in buffer:
+                    yield f"data: {buffer}\n\n"
+                    buffer = ""
+                
+                await asyncio.sleep(0.005)
+
+            if buffer:
+                yield f"data: {buffer}\n\n"
+
+            if not callback_handler.is_cancelled:
+                elapsed_time = time.time() - start_time
+                yield f"data: \n\nRelatório concluído em {elapsed_time:.2f} segundos\n\n"
+                yield "data: [FIM]\n\n"
+
+        except Exception as e:
+            logger.error(f"[DEBUG] Erro na geração do relatório: {str(e)}")
+            yield f"data: [ERRO] {str(e)}\n\n"
+        finally:
+            if request_id in active_streams:
+                del active_streams[request_id]
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"X-Handler-ID": request_id}
+    )
+
+@app.post("/api/generate-report/stream/summary")
+async def generate_summary_report_stream(
+    request: ReportRequest,
+    db: Session = Depends(get_db)
+):
+    request_id = str(uuid4())
+    callback_handler = CustomAsyncCallbackHandler()
+    active_streams[request_id] = callback_handler
+    start_time = time.time()
+
+    # Configuração para sumário
+    chat_model_streaming = ChatOpenAI(
+        model="gpt-3.5-turbo-16k",
+        streaming=True,
+        temperature=0.5,
+        max_tokens=2000,
+        request_timeout=120,
+        callbacks=[callback_handler],
+        openai_api_key=os.getenv('OPENAI_API_KEY')
+    )
+
+    async def generate():
+        try:
+            bond = db.query(models.Bond).filter(models.Bond.id == request.bond_id).first()
+            if not bond:
+                yield "data: [ERRO] Título não encontrado\n\n"
+                return
+
+            yield "data: Iniciando análise do título\n\n"
+            await asyncio.sleep(0.5)
+
+            # Buscar projetos e ODS relacionados
+            projects = db.execute(projects_view_query, {"bond_id": bond.id}).fetchall()
+            documents = await fetch_document_details(bond.name, db)
+            
+            # Formatar análise de ODS com seus relacionamentos
+            ods_analysis = []
+            for project in projects:
+                ods_numbers = [i for i in range(1, 18) if getattr(project, f'ods{i}', False)]
+                for ods in ods_numbers:
+                    ods_code = f"ODS{ods}"
+                    mapping = get_complete_mapping(ods_code)
+                    
+                    ods_analysis.append(f"""
+                    {mapping['name']} (ODS {ods}) - Projeto {project.project_name}:
+                    - Indicadores GRI: {', '.join(mapping['gri_indicators'])}
+                    - Padrões IFC: {', '.join(mapping['ifc_standards'])}
+                    - Aspectos IFC: {', '.join(mapping['ifc_descriptions'])}
+                    """)
+
+            prompt = f"""
+            Como analista especializado em títulos verdes e sustentáveis, gere um sumário executivo 
+            conciso e objetivo do título, abordando os seguintes aspectos:
+
+            DADOS DO TÍTULO:
+            - Nome: {bond.name}
+            - Tipo: {bond.type}
+            - Valor: {bond.value}
+            - Percentual ESG: {bond.esg_percentage}%
+            - Data de Emissão: {bond.issue_date}
+
+            ANÁLISE DE ODS E FRAMEWORKS:
+            {chr(10).join(ods_analysis)}
+
+            O sumário executivo deve incluir:
+
+            1. VISÃO GERAL FINANCEIRA
+            - Análise do valor e condições financeiras do título
+            - Avaliação do percentual ESG e sua relevância
+            - Indicadores financeiros chave
+
+            2. IMPACTO ESG E FRAMEWORKS
+            - Análise dos ODS impactados e seus indicadores GRI
+            - Alinhamento com padrões IFC
+            - Benefícios ambientais e sociais esperados
+
+            3. CONCLUSÃO
+            - Pontos fortes do título
+            - Principais desafios e oportunidades
+            - Recomendação geral
+            """
+
+            messages = [
+                SystemMessage(content="Você é um analista especializado em títulos verdes e sustentáveis, com profundo conhecimento em análise financeira e frameworks ESG."),
+                HumanMessage(content=prompt)
+            ]
+
+            task = asyncio.create_task(chat_model_streaming.agenerate([messages]))
+            
+            buffer = ""
+            async for token in callback_handler.aiter():
+                if callback_handler.is_cancelled:
+                    yield "data: [CANCELADO]\n\n"
+                    break
+                
+                buffer += token
+                if len(buffer) >= 30 or "\n\n" in buffer:
+                    yield f"data: {buffer}\n\n"
+                    buffer = ""
+                
+                await asyncio.sleep(0.005)
+
+            if buffer:
+                yield f"data: {buffer}\n\n"
+
+            if not callback_handler.is_cancelled:
+                elapsed_time = time.time() - start_time
+                yield f"data: \n\nRelatório concluído em {elapsed_time:.2f} segundos\n\n"
+                yield "data: [FIM]\n\n"
+
+        except Exception as e:
+            logger.error(f"[DEBUG] Erro na geração do sumário: {str(e)}")
+            yield f"data: [ERRO] {str(e)}\n\n"
+        finally:
+            if request_id in active_streams:
+                del active_streams[request_id]
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"X-Handler-ID": request_id}
+    )
+
+@app.post("/api/generate-report/stream/complete")
+async def generate_complete_report_stream(
+    request: ReportRequest,
+    db: Session = Depends(get_db)
+):
+    request_id = str(uuid4())
+    callback_handler = CustomAsyncCallbackHandler()
+    active_streams[request_id] = callback_handler
+    start_time = time.time()
+
+    # Configuração para relatório completo
+    chat_model_streaming = ChatOpenAI(
+        model="gpt-4-turbo-preview",
+        streaming=True,
+        temperature=0.7,
+        max_tokens=4000,
+        request_timeout=180,
+        callbacks=[callback_handler],
+        openai_api_key=os.getenv('OPENAI_API_KEY')
+    )
+
+    async def generate():
+        try:
+            bond = db.query(models.Bond).filter(models.Bond.id == request.bond_id).first()
+            if not bond:
+                yield "data: [ERRO] Título não encontrado\n\n"
+                return
+
+            yield "data: Iniciando análise detalhada do título\n\n"
+            await asyncio.sleep(0.5)
+
+            # Buscar projetos e ODS relacionados
+            projects = db.execute(projects_view_query, {"bond_id": bond.id}).fetchall()
+            documents = await fetch_document_details(bond.name, db)
+            
+            # Formatar análise detalhada de ODS com frameworks
+            ods_analysis = []
+            for project in projects:
+                ods_numbers = [i for i in range(1, 18) if getattr(project, f'ods{i}', False)]
+                for ods in ods_numbers:
+                    ods_code = f"ODS{ods}"
+                    mapping = get_complete_mapping(ods_code)
+                    
+                    ifc_details = []
+                    for std in mapping['ifc_standards']:
+                        ifc_details.append(f"{std}: {IFC_PERFORMANCE_STANDARDS[std]}")
+                    
+                    ods_analysis.append(f"""
+                    {mapping['name']} (ODS {ods}) - Projeto {project.project_name}:
+                    
+                    Indicadores GRI Aplicáveis:
+                    {chr(10).join([f"- {indicator}" for indicator in mapping['gri_indicators']])}
+                    
+                    Padrões IFC Relacionados:
+                    {chr(10).join([f"- {detail}" for detail in ifc_details])}
+                    
+                    Aspectos de Implementação:
+                    {chr(10).join([f"- {desc}" for desc in mapping['ifc_descriptions']])}
+                    """)
+
+            prompt = f"""
+            Analise os dados do título verde/sustentável e gere um relatório detalhado seguindo a estrutura abaixo.
+
+            DADOS DO TÍTULO:
+            - Nome: {bond.name}
+            - Tipo: {bond.type}
+            - Valor: {bond.value}
+            - Percentual ESG: {bond.esg_percentage}%
+            - Data de Emissão: {bond.issue_date}
+
+            ANÁLISE DETALHADA DE ODS E FRAMEWORKS:
+            {chr(10).join(ods_analysis)}
+
+            DOCUMENTAÇÃO RELACIONADA:
+            {chr(10).join(f"- {doc['title']}: {doc['type']}" for doc in documents)}
+
+            Estruture o relatório detalhadamente nas seguintes seções:
+
+            1. ANÁLISE FINANCEIRA E DE MERCADO
+            - Avaliação detalhada das condições financeiras do título
+            - Análise do valor e precificação em relação ao mercado
+            - Comparação com benchmarks de títulos verdes similares
+            - Análise de risco-retorno e liquidez
+            - Estrutura de taxas e custos
+            - Perspectivas de valorização
+            - Impacto do rating ESG na precificação
+
+            2. ANÁLISE DE IMPACTO AMBIENTAL
+            - Quantificação dos benefícios ambientais diretos
+            - Métricas de redução de emissões de GEE
+            - Análise de eficiência energética e recursos
+            - Avaliação do ciclo de vida do projeto
+            - Gestão de resíduos e economia circular
+            - Conformidade com certificações ambientais
+            - Riscos ambientais e medidas mitigatórias
+
+            3. ANÁLISE DE IMPACTO SOCIAL
+            - Benefícios sociais quantificáveis dos projetos
+            - Impacto nas comunidades locais e stakeholders
+            - Geração de empregos e desenvolvimento local
+            - Programas de engajamento comunitário
+            - Saúde e segurança ocupacional
+            - Direitos humanos e trabalhistas
+            - Diversidade e inclusão
+
+            4. GOVERNANÇA E COMPLIANCE
+            - Estrutura de governança do projeto
+            - Framework de gestão ESG
+            - Processos de monitoramento e reporte
+            - Política de transparência e divulgação
+            - Gestão de riscos ESG
+            - Conformidade regulatória
+            - Auditoria e verificação externa
+
+            5. ALINHAMENTO COM FRAMEWORKS
+            - Detalhamento dos ODS impactados:
+                {chr(10).join([f"* {mapping['name']}" for mapping in [get_complete_mapping(f"ODS{i}") for i in range(1, 18) if getattr(projects[0], f'ods{i}', False)]])}
+            - Indicadores GRI aplicáveis e métricas
+            - Padrões de Performance IFC
+            - Princípios de Green Bonds (GBP)
+            - Taxonomia verde aplicável
+            - Alinhamento com acordos climáticos
+            - Certificações e verificações externas
+
+            6. RECOMENDAÇÕES E CONCLUSÕES
+            - Pontos fortes e diferenciais competitivos
+            - Áreas de melhoria e riscos identificados
+            - Oportunidades de desenvolvimento
+            - Recomendações específicas por área:
+                * Financeira
+                * Ambiental
+                * Social
+                * Governança
+            - Próximos passos sugeridos
+            - Conclusão geral sobre a qualidade do título
+
+            Para cada seção:
+            - Forneça análise detalhada baseada nos dados disponíveis
+            - Inclua métricas quantitativas sempre que possível
+            - Compare com benchmarks do setor quando relevante
+            - Identifique riscos e oportunidades específicos
+            - Sugira melhorias práticas e acionáveis
+            - Use linguagem técnica apropriada para relatórios ESG e financeiros
+
+            Formate o relatório de maneira profissional e clara, usando marcadores e subtópicos para facilitar a leitura e compreensão.
+            """
+
+            messages = [
+                SystemMessage(content="Você é um especialista em análise de títulos verdes e sustentáveis, com profundo conhecimento em frameworks ESG, análise financeira e padrões internacionais de sustentabilidade."),
+                HumanMessage(content=prompt)
+            ]
+
+            task = asyncio.create_task(chat_model_streaming.agenerate([messages]))
+            
+            buffer = ""
+            async for token in callback_handler.aiter():
+                if callback_handler.is_cancelled:
+                    yield "data: [CANCELADO]\n\n"
+                    break
+                
+                buffer += token
+                if len(buffer) >= 30 or "\n\n" in buffer:
+                    yield f"data: {buffer}\n\n"
+                    buffer = ""
+                
+                await asyncio.sleep(0.005)
+
+            if buffer:
+                yield f"data: {buffer}\n\n"
+
+            if not callback_handler.is_cancelled:
+                elapsed_time = time.time() - start_time
+                yield f"data: \n\nRelatório concluído em {elapsed_time:.2f} segundos\n\n"
+                yield "data: [FIM]\n\n"
+
+        except Exception as e:
+            logger.error(f"[DEBUG] Erro na geração do relatório: {str(e)}")
+            yield f"data: [ERRO] {str(e)}\n\n"
+        finally:
+            if request_id in active_streams:
+                del active_streams[request_id]
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"X-Handler-ID": request_id}
+    )
+
+# Adicionar endpoint para cancelamento
+@app.post("/api/generate-report/cancel/{request_id}")
+async def cancel_report_generation(request_id: str):
+    if request_id in active_streams:
+        active_streams[request_id].cancel()
+        return {"status": "cancelled"}
+    return {"status": "not_found"}
+
+# Armazenar streams ativos
+active_streams: Dict[str, CustomAsyncCallbackHandler] = {}
+
+@app.get("/api/project-tracking/changes")
+async def check_project_changes(
+    last_update: Optional[datetime] = Query(None),
+    db: Session = Depends(get_db)
+):
+    try:
+        query = db.query(models.ProjectTracking)
+        
+        if last_update:
+            query = query.filter(models.ProjectTracking.updated_at > last_update)
+            
+        changes = query.all()
+        return {
+            "has_changes": len(changes) > 0,
+            "last_update": datetime.now(timezone.utc),
+            "changes": changes
+        }
+    except Exception as e:
+        logger.error(f"Erro ao verificar mudanças: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Adicionar as rotas do InfoLibrary
+UPLOAD_DIR = os.path.join(os.getcwd(), "uploads", "infolibrary")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+@app.post("/api/infolibrary-documents/upload", response_model=schemas.InfoLibraryDocumentResponse)
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    document_type: str = Form(...),
+    reference_date: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+    db: Session = Depends(get_db)
+):
+    try:
+        logger.info(f"Iniciando upload do documento: {title}")
+        # Criar nome único para o arquivo
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_extension = os.path.splitext(file.filename)[1]
+        unique_filename = f"{timestamp}{file_extension}"
+        file_path = os.path.join(UPLOAD_DIR, unique_filename)
+  
+        # Salvar arquivo
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+  
+        # Determinar o MIME type do arquivo
+        mime_type = file.content_type
+  
+        # Criar registro no banco
+        db_document = models.InfoLibraryDocument(
+            title=title,
+            document_type=document_type,
+            reference_date=reference_date,
+            description=description,
+            file_path=file_path,
+            original_filename=file.filename,
+            file_size=os.path.getsize(file_path),
+            mime_type=mime_type,
+            uploaded_by="system"
+        )
+        
+        db.add(db_document)
+        db.commit()
+        db.refresh(db_document)
+        
+        # Processar documento para ChromaDB em tempo real
+        logger.info(f"Iniciando indexação do documento {db_document.id} no ChromaDB")
+        try:
+            await process_document_for_chroma(db_document.id, db)
+            logger.info(f"Documento {db_document.id} indexado com sucesso no ChromaDB")
+        except Exception as index_error:
+            logger.error(f"Erro ao indexar documento no ChromaDB: {str(index_error)}")
+            logger.error(traceback.format_exc())
+            # Não falhar o upload se a indexação falhar
+            # O documento pode ser re-indexado posteriormente
+          
+        return db_document
+  
+    except Exception as e:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+        logger.error(f"Erro no upload: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao fazer upload do arquivo: {str(e)}"
+        )
+  
+@app.get("/api/infolibrary-documents", response_model=List[schemas.InfoLibraryDocumentResponse])
+def get_documents(db: Session = Depends(get_db)):
+    try:
+        documents = db.query(models.InfoLibraryDocument).order_by(models.InfoLibraryDocument.created_at.desc()).all()
+        return documents
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao buscar documentos: {str(e)}"
+        )
+  
+@app.get("/api/infolibrary-documents/download/{document_id}")
+async def download_document(document_id: int, db: Session = Depends(get_db)):
+    try:
+        document = db.query(models.InfoLibraryDocument).filter(models.InfoLibraryDocument.id == document_id).first()
+        if not document:
+            raise HTTPException(status_code=404, detail="Documento não encontrado")
+  
+        if not os.path.exists(document.file_path):
+            raise HTTPException(status_code=404, detail="Arquivo não encontrado")
+  
+        return FileResponse(
+            document.file_path,
+            filename=document.original_filename,
+            media_type=document.mime_type or 'application/octet-stream'
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao fazer download do arquivo: {str(e)}"
+        )
+  
+@app.delete("/api/infolibrary-documents/{document_id}")
+async def delete_document(document_id: int, db: Session = Depends(get_db)):
+    document = db.query(models.InfoLibraryDocument).filter(models.InfoLibraryDocument.id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Documento não encontrado")
+  
+    # Remover arquivo físico
+    if os.path.exists(document.file_path):
+        os.remove(document.file_path)
+  
+    # Remover registro do banco
+    db.delete(document)
+    db.commit()
+  
+    return {"message": "Documento excluído com sucesso"}
+
+async def process_document_for_chroma(document_id: int, db: Session):
+    """Processa um documento do InfoLibrary para o ChromaDB"""
+    try:
+        logger.info(f"Iniciando processamento do documento {document_id} para ChromaDB")
+        
+        # Buscar documento no InfoLibrary
+        document = db.query(models.InfoLibraryDocument).filter(
+            models.InfoLibraryDocument.id == document_id
+        ).first()
+        
+        if not document:
+            logger.error(f"Documento {document_id} não encontrado no banco de dados")
+            raise HTTPException(status_code=404, detail="Documento não encontrado")
+
+        logger.info(f"Documento encontrado: {document.title} ({document.mime_type})")
+
+        # Extrair texto do documento baseado no mime_type
+        text_content = ""
+        try:
+            if document.mime_type == 'application/pdf':
+                logger.info("Processando documento PDF...")
+                loader = PyPDFLoader(document.file_path)
+                pages = loader.load()
+                text_content = "\n".join(page.page_content for page in pages)
+                logger.info(f"PDF processado: {len(pages)} páginas extraídas")
+            
+            elif document.mime_type in ['application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document']:
+                logger.info("Processando documento Word...")
+                loader = Docx2txtLoader(document.file_path)
+                pages = loader.load()
+                text_content = "\n".join(page.page_content for page in pages)
+                logger.info("Documento Word processado com sucesso")
+            
+            else:
+                logger.info("Tentando processar como texto plano...")
+                with open(document.file_path, 'r', encoding='utf-8') as f:
+                    text_content = f.read()
+                logger.info("Arquivo de texto processado com sucesso")
+                
+        except Exception as e:
+            logger.error(f"Erro ao processar arquivo: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro ao processar arquivo: {str(e)}"
+            )
+
+        logger.info(f"Conteúdo extraído: {len(text_content)} caracteres")
+
+        # Dividir o texto em chunks menores
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            length_function=len
+        )
+        chunks = text_splitter.split_text(text_content)
+        logger.info(f"Texto dividido em {len(chunks)} chunks")
+
+        # Gerar embeddings e adicionar ao ChromaDB
+        try:
+            logger.info("Iniciando geração de embeddings...")
+            embeddings = OpenAIEmbeddings(openai_api_key=os.getenv('OPENAI_API_KEY'))
+            
+            # Criar metadados do documento
+            metadata = {
+                "title": document.title,
+                "document_type": document.document_type,
+                "reference_date": document.reference_date,
+                "description": document.description,
+                "original_filename": document.original_filename,
+                "mime_type": document.mime_type,
+                "infolibrary_id": document.id,
+                "uploaded_by": document.uploaded_by,
+                "created_at": document.created_at.isoformat() if document.created_at else None
+            }
+            logger.info(f"Metadados preparados: {metadata}")
+
+            # Adicionar chunks ao ChromaDB
+            logger.info("Iniciando inserção no ChromaDB...")
+            for i, chunk in enumerate(chunks):
+                chunk_metadata = {
+                    **metadata,
+                    "chunk_index": i,
+                    "total_chunks": len(chunks)
+                }
+                
+                collection.add(
+                    documents=[chunk],
+                    metadatas=[chunk_metadata],
+                    ids=[f"{document.id}_chunk_{i}"]
+                )
+                logger.info(f"Chunk {i+1}/{len(chunks)} inserido com sucesso")
+
+            logger.info(f"Documento {document_id} indexado com sucesso no ChromaDB")
+            return {
+                "status": "success",
+                "message": f"Documento {document.title} indexado com sucesso",
+                "chunks_processed": len(chunks)
+            }
+
+        except Exception as e:
+            logger.error(f"Erro ao gerar embeddings/inserir no ChromaDB: {str(e)}")
+            logger.error(f"Detalhes do erro: {traceback.format_exc()}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro ao processar documento para ChromaDB: {str(e)}"
+            )
+
+    except Exception as e:
+        logger.error(f"Erro geral no processamento: {str(e)}")
+        logger.error(f"Traceback completo: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao processar documento: {str(e)}"
+        )
+
+@app.post("/api/infolibrary-documents/{document_id}/index")
+async def index_document_to_chroma(
+    document_id: int,
+    db: Session = Depends(get_db)
+):
+    """Endpoint para indexar um documento do InfoLibrary no ChromaDB"""
+    try:
+        result = await process_document_for_chroma(document_id, db)
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Erro ao indexar documento: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao indexar documento: {str(e)}"
+        )
+
+@app.get("/api/infolibrary-documents/{document_id}/index-status")
+async def check_document_index_status(document_id: int, db: Session = Depends(get_db)):
+    """Verifica se um documento está indexado no ChromaDB"""
+    try:
+        # Buscar no ChromaDB por documentos com o infolibrary_id
+        results = collection.get(
+            where={"infolibrary_id": str(document_id)}
+        )
+        
+        if results and len(results['ids']) > 0:
+            return {
+                "status": "indexed",
+                "chunks_count": len(results['ids']),
+                "metadata": results['metadatas'][0] if results['metadatas'] else None
+            }
+        return {
+            "status": "not_indexed",
+            "chunks_count": 0,
+            "metadata": None
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao verificar status de indexação: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao verificar status de indexação: {str(e)}"
+        )
+
+@app.post("/api/chat")
+async def chat(request: Request):
+    try:
+        logger.info("Iniciando processamento de chat")
+        data = await request.json()
+        message = data.get("message")
+        history = data.get("history", [])
+
+        logger.info(f"Mensagem recebida: {message}")
+        logger.info(f"Histórico recebido: {history}")
+
+        # Inicializar o modelo de chat
+        logger.info("Inicializando modelo de chat OpenAI")
+        chat_model = ChatOpenAI(
+            model_name="gpt-3.5-turbo",
+            temperature=0.7,
+            openai_api_key=os.getenv('OPENAI_API_KEY')
+        )
+
+        # Construir o contexto com documentos do ChromaDB
+        logger.info("Buscando contexto no ChromaDB")
+        results = collection.query(
+            query_texts=[message],
+            n_results=3
+        )
+
+        context = ""
+        if results and results['documents']:
+            context = "\n\n".join(results['documents'][0])
+            logger.info(f"Contexto encontrado: {context[:200]}...")
+        else:
+            logger.info("Nenhum contexto relevante encontrado no ChromaDB")
+
+        # Construir a mensagem do sistema
+        logger.info("Construindo mensagem do sistema")
+        system_message = f"""Você é um assistente especializado em ESG e documentos corporativos.
+        Use o seguinte contexto para responder às perguntas: {context}
+        Se não encontrar a informação no contexto, responda com base em seu conhecimento geral."""
+
+        # Construir histórico de mensagens
+        logger.info("Construindo lista de mensagens com histórico")
+        messages = [
+            SystemMessage(content=system_message),
+            *[HumanMessage(content=msg["content"]) if msg["role"] == "user" else 
+              SystemMessage(content=msg["content"]) 
+              for msg in history],
+            HumanMessage(content=message)
+        ]
+
+        # Gerar resposta
+        logger.info("Gerando resposta com o modelo")
+        response = chat_model.generate([messages])
+        assistant_message = response.generations[0][0].text
+
+        logger.info(f"Resposta gerada: {assistant_message[:200]}...")
+
+        return {
+            "response": assistant_message
+        }
+
+    except Exception as e:
+        logger.error("Erro detalhado no chat:")
+        logger.error(f"Tipo do erro: {type(e)}")
+        logger.error(f"Mensagem de erro: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao processar mensagem: {str(e)}"
+        )
+
+def check_document_in_chroma(document_id: int) -> dict:
+    """
+    Verifica se um documento está indexado no ChromaDB e retorna seus detalhes
+    """
+    try:
+        logger.info(f"Verificando documento {document_id} no ChromaDB")
+        
+        # Buscar todos os chunks do documento
+        results = collection.get(
+            where={"infolibrary_id": str(document_id)}
+        )
+        
+        if not results or not results['ids']:
+            logger.info(f"Documento {document_id} não encontrado no ChromaDB")
+            return {
+                "exists": False,
+                "chunks": 0,
+                "metadata": None,
+                "first_chunk": None
+            }
+        
+        logger.info(f"Documento {document_id} encontrado com {len(results['ids'])} chunks")
+        return {
+            "exists": True,
+            "chunks": len(results['ids']),
+            "metadata": results['metadatas'][0] if results['metadatas'] else None,
+            "first_chunk": results['documents'][0] if results['documents'] else None
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao verificar documento no ChromaDB: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {
+            "exists": False,
+            "error": str(e)
+        }
+
+@app.get("/api/infolibrary-documents/{document_id}/index-status")
+async def check_document_index_status(document_id: int, db: Session = Depends(get_db)):
+    """Verifica se um documento está indexado no ChromaDB"""
+    try:
+        chroma_status = check_document_in_chroma(document_id)
+        
+        if chroma_status["exists"]:
+            return {
+                "status": "indexed",
+                "chunks_count": chroma_status["chunks"],
+                "metadata": chroma_status["metadata"],
+                "sample_text": chroma_status["first_chunk"][:200] if chroma_status["first_chunk"] else None
+            }
+        
+        return {
+            "status": "not_indexed",
+            "chunks_count": 0,
+            "metadata": None,
+            "error": chroma_status.get("error")
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao verificar status de indexação: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao verificar status de indexação: {str(e)}"
+        )
+
+
 
 

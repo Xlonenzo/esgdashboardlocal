@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { FaEdit, FaTrash, FaPlus } from 'react-icons/fa';
+import { FaEdit, FaTrash, FaPlus, FaExclamationCircle, FaFilter, FaChevronUp, FaChevronDown } from 'react-icons/fa';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { API_URL } from '../config';
 
 // Helper para gerenciar valores ODS
@@ -76,6 +77,12 @@ const ODSHelper = {
   }
 };
 
+const PROJECT_TYPES = {
+  AMBIENTAL: 'Ambiental',
+  SOCIAL: 'Social',
+  GOVERNANCA: 'Governança'
+};
+
 function ESGProjects({ sidebarColor, buttonColor }) {
   const [projects, setProjects] = useState([]);
   const [companies, setCompanies] = useState([]);
@@ -113,6 +120,41 @@ function ESGProjects({ sidebarColor, buttonColor }) {
     ods16: 0,
     ods17: 0
   });
+  const [currentPage, setCurrentPage] = useState(1);
+  const [projectsPerPage] = useState(10);
+  const [isFilterExpanded, setIsFilterExpanded] = useState(false);
+
+  // Estados dos filtros
+  const [filters, setFilters] = useState({
+    name: '',
+    company_id: '',
+    project_type: '',
+    status: ''
+  });
+
+  // Função para lidar com mudanças nos filtros
+  const handleFilterChange = (field, value) => {
+    setFilters(prev => ({
+      ...prev,
+      [field]: value
+    }));
+    setCurrentPage(1);
+  };
+
+  // Aplicar filtros aos projetos
+  const filteredProjects = projects.filter(project => {
+    return (
+      project.name.toLowerCase().includes(filters.name.toLowerCase()) &&
+      (filters.company_id === '' || project.company_id.toString() === filters.company_id) &&
+      (filters.project_type === '' || project.project_type === filters.project_type) &&
+      (filters.status === '' || project.status === filters.status)
+    );
+  });
+
+  // Calcular projetos da página atual (usando projetos filtrados)
+  const indexOfLastProject = currentPage * projectsPerPage;
+  const indexOfFirstProject = indexOfLastProject - projectsPerPage;
+  const currentProjects = filteredProjects.slice(indexOfFirstProject, indexOfLastProject);
 
   useEffect(() => {
     console.log('Estado atual do newProject:', newProject);
@@ -125,11 +167,21 @@ function ESGProjects({ sidebarColor, buttonColor }) {
 
   const fetchCompanies = async () => {
     try {
-      const response = await axios.get(`${API_URL}/api/companies`);
+      const config = {
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        withCredentials: true
+      };
+
+      const response = await axios.get(`${API_URL}/companies`, config);
       console.log('Companies data:', response.data);
       setCompanies(response.data);
     } catch (error) {
       console.error('Erro ao buscar empresas:', error);
+      console.error('Detalhes do erro:', error.response?.data);
+      setCompanies([]);
     }
   };
 
@@ -167,13 +219,38 @@ function ESGProjects({ sidebarColor, buttonColor }) {
       const odsValues = ODSHelper.formatValues(newProject);
       console.log('Valores ODS formatados:', odsValues);
 
-      // Preparar dados para envio
+      // Preparar dados para envio - removendo campos inválidos
       const formData = {
-        ...newProject,
+        name: newProject.name,
         company_id: parseInt(newProject.company_id),
+        project_type: newProject.project_type,
+        start_date: newProject.start_date,
+        end_date: newProject.end_date,
         budget_allocated: parseFloat(newProject.budget_allocated),
+        currency: newProject.currency,
+        status: newProject.status,
         progress_percentage: parseFloat(newProject.progress_percentage),
-        ...odsValues // Sobrescrever com valores ODS formatados
+        expected_impact: newProject.expected_impact,
+        actual_impact: newProject.actual_impact,
+        last_audit_date: newProject.last_audit_date,
+        // Adicionar valores ODS individualmente
+        ods1: odsValues.ods1,
+        ods2: odsValues.ods2,
+        ods3: odsValues.ods3,
+        ods4: odsValues.ods4,
+        ods5: odsValues.ods5,
+        ods6: odsValues.ods6,
+        ods7: odsValues.ods7,
+        ods8: odsValues.ods8,
+        ods9: odsValues.ods9,
+        ods10: odsValues.ods10,
+        ods11: odsValues.ods11,
+        ods12: odsValues.ods12,
+        ods13: odsValues.ods13,
+        ods14: odsValues.ods14,
+        ods15: odsValues.ods15,
+        ods16: odsValues.ods16,
+        ods17: odsValues.ods17
       };
 
       console.log('Dados completos para envio:', formData);
@@ -231,8 +308,9 @@ function ESGProjects({ sidebarColor, buttonColor }) {
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center">
               Nome do Projeto
+              <FaExclamationCircle className="ml-1 text-red-500 opacity-60" size={12} title="Campo obrigatório" />
             </label>
             <input
               type="text"
@@ -245,8 +323,9 @@ function ESGProjects({ sidebarColor, buttonColor }) {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center">
               Empresa
+              <FaExclamationCircle className="ml-1 text-red-500 opacity-60" size={12} title="Campo obrigatório" />
             </label>
             <select
               name="company_id"
@@ -255,7 +334,7 @@ function ESGProjects({ sidebarColor, buttonColor }) {
               className="p-2 border rounded w-full"
               required
             >
-              <option value="">Selecione a Empresa</option>
+              <option value="">Selecione uma empresa</option>
               {companies.map(company => (
                 <option key={company.id} value={company.id}>
                   {company.name}
@@ -265,8 +344,9 @@ function ESGProjects({ sidebarColor, buttonColor }) {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center">
               Tipo de Projeto
+              <FaExclamationCircle className="ml-1 text-red-500 opacity-60" size={12} title="Campo obrigatório" />
             </label>
             <select
               name="project_type"
@@ -275,16 +355,17 @@ function ESGProjects({ sidebarColor, buttonColor }) {
               className="p-2 border rounded w-full"
               required
             >
-              <option value="">Selecione o Tipo</option>
-              <option value="Environmental">Ambiental</option>
-              <option value="Social">Social</option>
-              <option value="Governance">Governança</option>
+              <option value="">Selecione o tipo</option>
+              {Object.values(PROJECT_TYPES).map(type => (
+                <option key={type} value={type}>{type}</option>
+              ))}
             </select>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center">
               Status
+              <FaExclamationCircle className="ml-1 text-red-500 opacity-60" size={12} title="Campo obrigatório" />
             </label>
             <select
               name="status"
@@ -302,8 +383,9 @@ function ESGProjects({ sidebarColor, buttonColor }) {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center">
               Data de Início
+              <FaExclamationCircle className="ml-1 text-red-500 opacity-60" size={12} title="Campo obrigatório" />
             </label>
             <input
               type="date"
@@ -316,8 +398,9 @@ function ESGProjects({ sidebarColor, buttonColor }) {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center">
               Data de Término
+              <FaExclamationCircle className="ml-1 text-red-500 opacity-60" size={12} title="Campo obrigatório" />
             </label>
             <input
               type="date"
@@ -330,8 +413,9 @@ function ESGProjects({ sidebarColor, buttonColor }) {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center">
               Orçamento
+              <FaExclamationCircle className="ml-1 text-red-500 opacity-60" size={12} title="Campo obrigatório" />
             </label>
             <input
               type="number"
@@ -346,8 +430,9 @@ function ESGProjects({ sidebarColor, buttonColor }) {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center">
               Moeda
+              <FaExclamationCircle className="ml-1 text-red-500 opacity-60" size={12} title="Campo obrigatório" />
             </label>
             <select
               name="currency"
@@ -363,8 +448,9 @@ function ESGProjects({ sidebarColor, buttonColor }) {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center">
               Progresso (%)
+              <FaExclamationCircle className="ml-1 text-red-500 opacity-60" size={12} title="Campo obrigatório" />
             </label>
             <input
               type="number"
@@ -379,8 +465,9 @@ function ESGProjects({ sidebarColor, buttonColor }) {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center">
               Data da Última Auditoria
+              <FaExclamationCircle className="ml-1 text-red-500 opacity-60" size={12} title="Campo obrigatório" />
             </label>
             <input
               type="date"
@@ -388,12 +475,14 @@ function ESGProjects({ sidebarColor, buttonColor }) {
               value={newProject.last_audit_date}
               onChange={handleInputChange}
               className="p-2 border rounded w-full"
+              required
             />
           </div>
 
           <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center">
               Impacto Esperado
+              <FaExclamationCircle className="ml-1 text-red-500 opacity-60" size={12} title="Campo obrigatório" />
             </label>
             <textarea
               name="expected_impact"
@@ -401,12 +490,14 @@ function ESGProjects({ sidebarColor, buttonColor }) {
               onChange={handleInputChange}
               className="p-2 border rounded w-full"
               rows="3"
+              required
             />
           </div>
 
           <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center">
               Impacto Real
+              <FaExclamationCircle className="ml-1 text-red-500 opacity-60" size={12} title="Campo obrigatório" />
             </label>
             <textarea
               name="actual_impact"
@@ -414,6 +505,7 @@ function ESGProjects({ sidebarColor, buttonColor }) {
               onChange={handleInputChange}
               className="p-2 border rounded w-full"
               rows="3"
+              required
             />
           </div>
         </div>
@@ -625,10 +717,13 @@ function ESGProjects({ sidebarColor, buttonColor }) {
     return "Desconhecido";
   };
 
-  // Adicione esta função helper no início do componente
-  const truncateText = (text, maxLength = 15) => {
-    if (!text) return '-';
-    return text.length > maxLength ? `${text.substring(0, maxLength)}...` : text;
+  // Adicionar função handlePageChange
+  const handlePageChange = (pageNumber) => {
+    setCurrentPage(pageNumber);
+    window.scrollTo({
+      top: 0,
+      behavior: 'smooth'
+    });
   };
 
   return (
@@ -637,7 +732,7 @@ function ESGProjects({ sidebarColor, buttonColor }) {
         <h2 className="text-2xl font-bold">Projetos ESG</h2>
         <button
           onClick={() => setIsFormOpen(true)}
-          className="px-4 py-2 text-white rounded flex items-center"
+          className="px-4 py-2 rounded text-white flex items-center gap-2 hover:opacity-80"
           style={{ backgroundColor: buttonColor }}
         >
           <FaPlus className="mr-2" /> Novo Projeto
@@ -646,104 +741,230 @@ function ESGProjects({ sidebarColor, buttonColor }) {
 
       {isFormOpen && renderForm()}
 
-      {/* Tabela de projetos */}
+      {/* Seção de Filtros Expansível */}
+      <div className="bg-white rounded-lg shadow-sm mb-4 border border-gray-100">
+        <button
+          onClick={() => setIsFilterExpanded(!isFilterExpanded)}
+          className="w-full flex items-center justify-between p-4 hover:bg-gray-50 transition-colors"
+          style={{ color: buttonColor }}
+        >
+          <div className="flex items-center gap-2">
+            <FaFilter size={16} style={{ color: buttonColor }} />
+            <span className="font-medium text-sm">Filtros</span>
+          </div>
+          {isFilterExpanded ? 
+            <FaChevronUp size={16} /> : 
+            <FaChevronDown size={16} />
+          }
+        </button>
+        
+        {isFilterExpanded && (
+          <div className="p-4 border-t border-gray-100 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Nome do Projeto</label>
+              <input
+                type="text"
+                value={filters.name}
+                onChange={(e) => handleFilterChange('name', e.target.value)}
+                className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm"
+                placeholder="Filtrar por nome"
+              />
+            </div>
+            
+            <div>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Empresa</label>
+              <select
+                value={filters.company_id}
+                onChange={(e) => handleFilterChange('company_id', e.target.value)}
+                className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm"
+              >
+                <option value="">Todas as empresas</option>
+                {companies.map(company => (
+                  <option key={company.id} value={company.id}>
+                    {company.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Tipo de Projeto</label>
+              <select
+                value={filters.project_type}
+                onChange={(e) => handleFilterChange('project_type', e.target.value)}
+                className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm"
+              >
+                <option value="">Todos os tipos</option>
+                <option value="Ambiental">Ambiental</option>
+                <option value="Social">Social</option>
+                <option value="Governança">Governança</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-600 mb-1">Status</label>
+              <select
+                value={filters.status}
+                onChange={(e) => handleFilterChange('status', e.target.value)}
+                className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm"
+              >
+                <option value="">Todos os status</option>
+                <option value="Em Andamento">Em Andamento</option>
+                <option value="Concluído">Concluído</option>
+                <option value="Cancelado">Cancelado</option>
+              </select>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Tabela ajustada */}
       <div className="overflow-x-auto">
-        <table className="min-w-full bg-white border">
+        <table className="min-w-full bg-white">
           <thead>
             <tr>
-              <th className="px-4 py-2 border">Nome</th>
-              <th className="px-4 py-2 border">Empresa</th>
-              <th className="px-4 py-2 border">Tipo</th>
-              <th className="px-4 py-2 border">Status</th>
-              <th className="px-4 py-2 border">Progresso</th>
-              <th className="px-4 py-2 border">Orçamento</th>
-              <th className="px-4 py-2 border">Data Início</th>
-              <th className="px-4 py-2 border">Data Fim</th>
-              <th className="px-4 py-2 border">Impacto Esperado</th>
-              <th className="px-4 py-2 border">Impacto Real</th>
-              <th className="px-4 py-2 border">Última Auditoria</th>
-              <th className="px-4 py-2 border">Ações</th>
+              <th 
+                className="px-4 py-3 border-b border-gray-100 text-left text-sm font-medium text-gray-600 whitespace-nowrap"
+                style={{ backgroundColor: `${buttonColor}15` }}
+              >
+                Nome / ODS
+              </th>
+              <th 
+                className="px-4 py-3 border-b border-gray-100 text-left text-sm font-medium text-gray-600 whitespace-nowrap"
+                style={{ backgroundColor: `${buttonColor}15` }}
+              >
+                Empresa
+              </th>
+              <th 
+                className="px-4 py-3 border-b border-gray-100 text-left text-sm font-medium text-gray-600 whitespace-nowrap"
+                style={{ backgroundColor: `${buttonColor}15` }}
+              >
+                Tipo
+              </th>
+              <th 
+                className="px-4 py-3 border-b border-gray-100 text-left text-sm font-medium text-gray-600 whitespace-nowrap"
+                style={{ backgroundColor: `${buttonColor}15` }}
+              >
+                Status
+              </th>
+              <th 
+                className="px-4 py-3 border-b border-gray-100 text-left text-sm font-medium text-gray-600 whitespace-nowrap"
+                style={{ backgroundColor: `${buttonColor}15` }}
+              >
+                Progresso
+              </th>
+              <th 
+                className="px-4 py-3 border-b border-gray-100 text-left text-sm font-medium text-gray-600 whitespace-nowrap"
+                style={{ backgroundColor: `${buttonColor}15` }}
+              >
+                Orçamento
+              </th>
+              <th 
+                className="px-4 py-3 border-b border-gray-100 text-left text-sm font-medium text-gray-600 whitespace-nowrap"
+                style={{ backgroundColor: `${buttonColor}15` }}
+              >
+                Período
+              </th>
+              <th 
+                className="px-4 py-3 border-b border-gray-100 text-center text-sm font-medium text-gray-600 whitespace-nowrap"
+                style={{ backgroundColor: `${buttonColor}15` }}
+              >
+                Ações
+              </th>
             </tr>
           </thead>
           <tbody>
-            {projects.length === 0 ? (
-              <tr>
-                <td colSpan="12" className="px-4 py-2 text-center border">
+            {currentProjects.length === 0 ? (
+              <tr className="hover:bg-gray-50 transition-colors">
+                <td colSpan="8" className="px-4 py-3 border-b border-gray-100 text-center text-sm text-gray-600">
                   Nenhum projeto encontrado
                 </td>
               </tr>
             ) : (
-              projects.map((project) => (
-                <tr key={project.id}>
-                  <td className="px-4 py-2 border">
-                    <div>
-                      <div>{project.name}</div>
-                      <div className="text-xs text-gray-500 mt-1">
-                        <div className="flex flex-wrap gap-1">
-                          {[...Array(17)].map((_, index) => {
-                            const odsValue = project[`ods${index + 1}`];
-                            if (odsValue > 0) {
-                              return (
-                                <span 
-                                  key={index} 
-                                  className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800"
-                                  title={`ODS ${index + 1}: ${getODSLabel(odsValue)}`}
-                                >
-                                  {index + 1}
-                                </span>
-                              );
-                            }
-                            return null;
-                          })}
+              currentProjects.map((project) => (
+                <tr key={project.id} className="hover:bg-gray-50 transition-colors">
+                  <td className="px-4 py-3 border-b border-gray-100 text-sm text-gray-600">
+                    <div className="text-sm text-gray-900">
+                      <div>
+                        <div className="font-medium">{project.name}</div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          <div className="flex flex-wrap gap-1">
+                            {Array.from({ length: 17 }, (_, i) => {
+                              const odsNumber = i + 1;
+                              const odsKey = `ods${odsNumber}`;
+                              const odsValue = parseFloat(project[odsKey] || 0);
+                              
+                              if (odsValue > 0) {
+                                return (
+                                  <span 
+                                    key={odsNumber} 
+                                    className="inline-flex items-center px-2 py-1 rounded bg-blue-100 text-blue-800 text-xs font-medium"
+                                    title={`ODS ${odsNumber}: ${getODSLabel(odsValue)}`}
+                                  >
+                                    {odsNumber}
+                                  </span>
+                                );
+                              }
+                              return null;
+                            })}
+                          </div>
                         </div>
                       </div>
                     </div>
                   </td>
-                  <td className="px-4 py-2 border">
-                    {companies.find(c => c.id === project.company_id)?.name}
+                  <td className="px-4 py-3 border-b border-gray-100 text-sm text-gray-600">
+                    <div className="text-sm text-gray-900">
+                      {companies.find(c => c.id === project.company_id)?.name}
+                    </div>
                   </td>
-                  <td className="px-4 py-2 border">{project.project_type}</td>
-                  <td className="px-4 py-2 border">
-                    {project.status === "Em Andamento" ? "Em andamento" : project.status}
+                  <td className="px-4 py-3 border-b border-gray-100 text-sm text-gray-600">
+                    <div className="text-sm text-gray-900">{project.project_type}</div>
                   </td>
-                  <td className="px-4 py-2 border">{project.progress_percentage}%</td>
-                  <td className="px-4 py-2 border">
-                    {new Intl.NumberFormat('pt-BR', {
-                      style: 'currency',
-                      currency: project.currency
-                    }).format(project.budget_allocated)}
+                  <td className="px-4 py-3 border-b border-gray-100 text-sm text-gray-600">
+                    <div className="text-sm text-gray-900">
+                      <span className={`px-2 py-1 rounded-full text-xs font-medium
+                        ${project.status === 'Em Andamento' ? 'bg-blue-100 text-blue-800' : 
+                          project.status === 'Concluído' ? 'bg-green-100 text-green-800' : 
+                          'bg-gray-100 text-gray-800'}`}>
+                        {project.status === "Em Andamento" ? "Em andamento" : project.status}
+                      </span>
+                    </div>
                   </td>
-                  <td className="px-4 py-2 border">
-                    {new Date(project.start_date).toLocaleDateString('pt-BR')}
+                  <td className="px-4 py-3 border-b border-gray-100 text-sm text-gray-600">
+                    <div className="text-sm text-gray-900">{project.progress_percentage}%</div>
                   </td>
-                  <td className="px-4 py-2 border">
-                    {new Date(project.end_date).toLocaleDateString('pt-BR')}
+                  <td className="px-4 py-3 border-b border-gray-100 text-sm text-gray-600">
+                    <div className="text-sm text-gray-900">
+                      {new Intl.NumberFormat('pt-BR', {
+                        style: 'currency',
+                        currency: project.currency
+                      }).format(project.budget_allocated)}
+                    </div>
                   </td>
-                  <td className="px-4 py-2 border" title={project.expected_impact || '-'}>
-                    {truncateText(project.expected_impact)}
+                  <td className="px-4 py-3 border-b border-gray-100 text-sm text-gray-600">
+                    <div className="text-sm text-gray-900">
+                      <div>{new Date(project.start_date).toLocaleDateString('pt-BR')}</div>
+                      <div className="text-gray-500">até</div>
+                      <div>{new Date(project.end_date).toLocaleDateString('pt-BR')}</div>
+                    </div>
                   </td>
-                  <td className="px-4 py-2 border" title={project.actual_impact || '-'}>
-                    {truncateText(project.actual_impact)}
-                  </td>
-                  <td className="px-4 py-2 border">
-                    {project.last_audit_date 
-                      ? new Date(project.last_audit_date).toLocaleDateString('pt-BR')
-                      : '-'
-                    }
-                  </td>
-                  <td className="px-4 py-2 border">
-                    <button
-                      onClick={() => handleEdit(project)}
-                      className="text-blue-500 hover:text-blue-700 mr-2"
-                    >
-                      <FaEdit />
-                    </button>
-                    <button
-                      onClick={() => handleDelete(project.id)}
-                      className="text-red-500 hover:text-red-700"
-                    >
-                      <FaTrash />
-                    </button>
+                  <td className="px-4 py-3 border-b border-gray-100 text-center">
+                    <div className="flex items-center justify-center gap-3">
+                      <button
+                        onClick={() => handleEdit(project)}
+                        className="text-gray-400 hover:text-gray-600 transition-colors"
+                        title="Editar"
+                      >
+                        <FaEdit size={16} />
+                      </button>
+                      <button
+                        onClick={() => handleDelete(project.id)}
+                        className="text-gray-400 hover:text-red-500 transition-colors"
+                        title="Excluir"
+                      >
+                        <FaTrash size={16} />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))
@@ -751,6 +972,89 @@ function ESGProjects({ sidebarColor, buttonColor }) {
           </tbody>
         </table>
       </div>
+
+      {/* Paginação */}
+      {!isFormOpen && filteredProjects.length > 0 && (
+        <div className="flex items-center justify-between border-t border-gray-200 bg-white px-4 py-3 sm:px-6">
+          <div className="flex flex-1 justify-between sm:hidden">
+            <button
+              onClick={() => handlePageChange(currentPage - 1)}
+              disabled={currentPage === 1}
+              className={`relative inline-flex items-center rounded-md px-4 py-2 text-sm font-medium ${
+                currentPage === 1
+                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                  : 'bg-white text-gray-700 hover:bg-gray-50'
+              } border border-gray-300`}
+            >
+              Anterior
+            </button>
+            <button
+              onClick={() => handlePageChange(currentPage + 1)}
+              disabled={currentPage === Math.ceil(filteredProjects.length / projectsPerPage)}
+              className={`relative ml-3 inline-flex items-center rounded-md px-4 py-2 text-sm font-medium ${
+                currentPage === Math.ceil(filteredProjects.length / projectsPerPage)
+                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                  : 'bg-white text-gray-700 hover:bg-gray-50'
+              }`}
+            >
+              Próximo
+            </button>
+          </div>
+          <div className="hidden sm:flex sm:flex-1 sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm text-gray-700">
+                Mostrando <span className="font-medium">{indexOfFirstProject + 1}</span> até{' '}
+                <span className="font-medium">
+                  {Math.min(indexOfLastProject, filteredProjects.length)}
+                </span>{' '}
+                de <span className="font-medium">{filteredProjects.length}</span> resultados
+              </p>
+            </div>
+            <div>
+              <nav className="isolate inline-flex -space-x-px rounded-md shadow-sm" aria-label="Pagination">
+                <button
+                  onClick={() => handlePageChange(currentPage - 1)}
+                  disabled={currentPage === 1}
+                  className={`relative inline-flex items-center rounded-l-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0 ${
+                    currentPage === 1 ? 'cursor-not-allowed' : 'cursor-pointer'
+                  }`}
+                >
+                  <span className="sr-only">Anterior</span>
+                  <ChevronLeft size={16} className="stroke-[1.5]" />
+                </button>
+                {Array.from(
+                  { length: Math.ceil(filteredProjects.length / projectsPerPage) },
+                  (_, i) => (
+                    <button
+                      key={i}
+                      onClick={() => handlePageChange(i + 1)}
+                      className={`relative inline-flex items-center px-4 py-2 text-sm font-semibold ${
+                        currentPage === i + 1
+                          ? 'z-10 bg-blue-600 text-white focus:z-20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600'
+                          : 'text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0'
+                      }`}
+                    >
+                      {i + 1}
+                    </button>
+                  )
+                )}
+                <button
+                  onClick={() => handlePageChange(currentPage + 1)}
+                  disabled={currentPage === Math.ceil(filteredProjects.length / projectsPerPage)}
+                  className={`relative inline-flex items-center rounded-r-md px-2 py-2 text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus:z-20 focus:outline-offset-0 ${
+                    currentPage === Math.ceil(filteredProjects.length / projectsPerPage)
+                      ? 'cursor-not-allowed'
+                      : 'cursor-pointer'
+                  }`}
+                >
+                  <span className="sr-only">Próximo</span>
+                  <ChevronRight size={16} className="stroke-[1.5]" />
+                </button>
+              </nav>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

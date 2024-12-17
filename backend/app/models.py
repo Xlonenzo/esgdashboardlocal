@@ -1,14 +1,14 @@
 # models.py
 from sqlalchemy import (
     Column, Integer, String, Float, Text, Boolean, Date, 
-    ForeignKey, ARRAY, Enum, UniqueConstraint, DateTime as SQLDateTime, Table
+    ForeignKey, ARRAY, Enum, UniqueConstraint, DateTime as SQLDateTime, Table, PrimaryKeyConstraint, Index
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .database import Base
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.types import DateTime
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, Integer, String, Numeric, Boolean, DateTime, ForeignKey, CheckConstraint
 
 from sqlalchemy import Column, Integer, String, Float, Text, Boolean, Date, ForeignKey, ARRAY, Enum, UniqueConstraint
@@ -38,7 +38,7 @@ class KPI(Base):
     cnpj = Column(String)
     kpicode = Column(String, unique=True, index=True)
     company_category = Column(String)  # Novo campo adicionado
-    isfavorite = Column(Boolean, default=False)  # Novo campo adicionado
+    isfavorite = Column(Boolean, default=False)  # Novo campo
     compliance = Column(ARRAY(String))  # Novo campo
 
 
@@ -86,7 +86,7 @@ class Company(Base):
     id = Column(Integer, primary_key=True, index=True)
     cnpj = Column(String(14), unique=True, nullable=False, index=True)
     name = Column(String(255), nullable=False)
-    razao_social = Column(String(255))
+    razao_social = Column(Text)
     endereco = Column(Text)
     trade_name = Column(String(100))
     registration_date = Column(Date)
@@ -97,16 +97,12 @@ class Company(Base):
     zip_code = Column(String(8))
     phone = Column(String(20))
     email = Column(String(100))
-    website = Column(String(100))
+    website = Column(String(200))
     is_active = Column(Boolean, default=True)
 
     # Adicionar relacionamento bidirecional
     kpi_entries = relationship("KPIEntry", back_populates="company", cascade="all, delete-orphan")
-    esg_projects = relationship("ESGProject", back_populates="company")
     project_tracking = relationship("ProjectTracking", back_populates="company", cascade="all, delete-orphan")
-    emission_data = relationship("EmissionData", back_populates="company")
-    suppliers = relationship("Supplier", back_populates="company", cascade="all, delete-orphan")
-    materiality_assessments = relationship("MaterialityAssessment", back_populates="company", cascade="all, delete-orphan")  # Novo relacionamento
     investments = relationship("Investment", back_populates="company", cascade="all, delete-orphan")
     compliance_audits = relationship("ComplianceAudit", back_populates="company", cascade="all, delete-orphan")
 
@@ -245,8 +241,8 @@ class Bond(Base):
     financial_institution_cnpj = Column(String, nullable=False)
     financial_institution_contact = Column(String, nullable=False)
 
-    # Relacionamentos
-    project_relations = relationship("BondProjectRelation", back_populates="bond", cascade="all, delete-orphan")
+    # Adicione esta linha
+    project_relations = relationship("BondProjectRelation", back_populates="bond")
 
     def __repr__(self):
         return f"<Bond {self.name} ({self.type})>"
@@ -268,13 +264,12 @@ class ESGProject(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
-    company_id = Column(Integer, ForeignKey("xlonesg.companies.id"), nullable=False)
-    project_type = Column(String, nullable=False)  # Environmental, Social ou Governance
+    project_type = Column(String, nullable=False)
     start_date = Column(Date, nullable=False)
     end_date = Column(Date, nullable=False)
     budget_allocated = Column(Float, nullable=False)
     currency = Column(String, default="BRL")
-    status = Column(String, nullable=False)  # Em andamento, Concluído, Cancelado, etc
+    status = Column(String, nullable=False)
     progress_percentage = Column(Float, default=0)
     expected_impact = Column(Text)
     actual_impact = Column(Text)
@@ -287,9 +282,6 @@ class ESGProject(Base):
         'ods11': 0, 'ods12': 0, 'ods13': 0, 'ods14': 0, 'ods15': 0,
         'ods16': 0, 'ods17': 0
     })
-
-    # Relacionamentos
-    company = relationship("Company", back_populates="esg_projects")
 
 class ProjectTracking(Base):
     __tablename__ = "project_tracking"
@@ -310,8 +302,6 @@ class ProjectTracking(Base):
     last_audit_date = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.current_timestamp())
     updated_at = Column(DateTime(timezone=True), server_default=func.current_timestamp(), onupdate=func.current_timestamp())
-    
-    # Campos ODS com tipo numeric(5,2)
     ods1 = Column(Numeric(5, 2), default=0)
     ods2 = Column(Numeric(5, 2), default=0)
     ods3 = Column(Numeric(5, 2), default=0)
@@ -331,9 +321,10 @@ class ProjectTracking(Base):
     ods17 = Column(Numeric(5, 2), default=0)
 
     company = relationship("Company", back_populates="project_tracking")
-
-    # Relacionamento direto com BondProjectRelation
     bond_relations = relationship("BondProjectRelation", back_populates="project")
+    emissions = relationship("EmissionData", back_populates="project")
+    suppliers = relationship("Supplier", back_populates="project", cascade="all, delete-orphan")
+    materiality_assessments = relationship("MaterialityAssessment", back_populates="project", cascade="all, delete-orphan")
 
 class EmissionData(Base):
     __tablename__ = "emission_data"
@@ -343,29 +334,29 @@ class EmissionData(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("xlonesg.companies.id"), nullable=False)
-    scope = Column(String(20), nullable=False, index=True)
-    emission_type = Column(String(50), nullable=False)
+    project_id = Column(Integer, ForeignKey("xlonesg.project_tracking.id", ondelete="CASCADE"), nullable=False)
+    scope = Column(String(255), nullable=False)
+    emission_type = Column(String(255), nullable=False)
     value = Column(Numeric(20, 6), nullable=False)
-    unit = Column(String(20), nullable=False)
-    source = Column(String(200), nullable=False)
-    calculation_method = Column(String(200), nullable=False)
+    unit = Column(String(255), nullable=False)
+    source = Column(String(255), nullable=False)
+    calculation_method = Column(String(255), nullable=False)
     uncertainty_level = Column(Numeric(5, 2), nullable=True)
-    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
-    calculated_emission = Column(Boolean, default=False, nullable=True)
-    reporting_standard = Column(String(20), nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.current_timestamp(), nullable=True)
-    updated_at = Column(DateTime(timezone=True), server_default=func.current_timestamp(), nullable=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False)
+    calculated_emission = Column(Boolean, default=False)
+    reporting_standard = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
-    # Relacionamento
-    company = relationship("Company", back_populates="emission_data")
+    # Relacionamento com o projeto
+    project = relationship("ProjectTracking", back_populates="emissions")
 
 class Supplier(Base):
     __tablename__ = "supplier"
     __table_args__ = {"schema": "xlonesg"}
 
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("xlonesg.companies.id"), nullable=False)
+    project_id = Column(Integer, ForeignKey("xlonesg.project_tracking.id"), nullable=False)
     name = Column(String, nullable=False)
     risk_level = Column(String, nullable=False)
     esg_score = Column(Float, nullable=False)
@@ -376,25 +367,26 @@ class Supplier(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
-    company = relationship("Company", back_populates="suppliers")
+    # Relacionamento apenas com o projeto
+    project = relationship("ProjectTracking", back_populates="suppliers")
 
 class MaterialityAssessment(Base):
     __tablename__ = "materiality_assessment"
     __table_args__ = {"schema": "xlonesg"}
 
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("xlonesg.companies.id"), nullable=False)
+    project_id = Column(Integer, ForeignKey("xlonesg.project_tracking.id"), nullable=False)
     topic = Column(String, nullable=False)
     business_impact = Column(Float, nullable=False)
     external_impact = Column(Float, nullable=False)
     stakeholder_importance = Column(Float, nullable=False)
-    priority_level = Column(String, nullable=False)  # Alto, Médio, Baixo
+    priority_level = Column(String, nullable=False)
     regulatory_alignment = Column(Boolean, default=False)
-    last_updated = Column(DateTime(timezone=True), server_default=func.now())
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
-    company = relationship("Company", back_populates="materiality_assessments")
+    # Update relationship to point to ProjectTracking instead of Company
+    project = relationship("ProjectTracking", back_populates="materiality_assessments")
 
 class Investment(Base):
     __tablename__ = "investment"
@@ -435,19 +427,107 @@ class ComplianceAudit(Base):
 
 class BondProjectRelation(Base):
     __tablename__ = "bond_project_relations"
+    __table_args__ = {"schema": "xlonesg"}
+
+    id = Column(Integer, primary_key=True, index=True)
+    bond_id = Column(Integer, ForeignKey("xlonesg.bonds.id"))
+    project_id = Column(Integer, ForeignKey("xlonesg.project_tracking.id"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # Relacionamentos
+    bond = relationship("Bond", back_populates="project_relations")
+    project = relationship("ProjectTracking", back_populates="bond_relations")
+
+class GenericDocument(Base):
+    __tablename__ = "generic_documents"
+    __table_args__ = {'schema': 'xlonesg'}
+
+    id = Column(Integer, primary_key=True, index=True)
+    entity_name = Column(String)
+    entity_id = Column(Integer)
+    filename = Column(String)
+    original_filename = Column(String)
+    file_type = Column(String)
+    file_size = Column(Integer)
+    mime_type = Column(String)
+    description = Column(String, nullable=True)
+    document_type = Column(String, nullable=True)
+    reference_date = Column(Date, nullable=True)
+    uploaded_by = Column(String(255), nullable=False, server_default='sistema')
+    upload_date = Column(DateTime(timezone=True), default=datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+
+class EnvironmentalDocument(Base):
+    __tablename__ = "environmental_document"
+    __table_args__ = {'schema': 'xlonesg'}
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    document_type = Column(String(55), nullable=True, name="documenttype")
+    document_subtype = Column(String(55), nullable=True, name="documentsubtype")
+    thematic_area = Column(String(55), nullable=True, name="thematicarea")
+    document_status = Column(String(55), nullable=True, name="documentstatus")
+    validity_period = Column(String(55), nullable=True, name="validityperiod")
+    language = Column(String(55), nullable=True)
+    document_format = Column(String(55), nullable=True, name="documentformat")
+    creation_date = Column(Date, nullable=True, name="creationdate")
+    last_modification_date = Column(Date, nullable=True, name="lastmodificationdate")
+    latitude = Column(Numeric(10, 6), nullable=True)
+    longitude = Column(Numeric(10, 6), nullable=True)
+    accessibility = Column(String(55), nullable=True)
+    executive_summary = Column(Text, nullable=True, name="executivesummary")
+    notes = Column(Text, nullable=True)
+    signature_authentication = Column(String(55), nullable=True, name="signatureauthentication")
+    legal_notice = Column(String(55), nullable=True, name="legalnotice")
+
+    # Adicionar esta linha
+    impact_studies = relationship("EnvironmentalImpactStudy", back_populates="environmental_document")
+
+    class Config:
+        orm_mode = True
+
+class EnvironmentalImpactStudy(Base):
+    __tablename__ = "environmental_impact_study"
     __table_args__ = (
-        UniqueConstraint('bond_id', 'project_id', name='uq_bond_project_relation'),
-        {"schema": "xlonesg"}
+        Index('idx_eia_env_doc_id', 'environmental_documentid'),
+        Index('idx_eia_project_location', 'projectlocation'),
+        {'schema': 'xlonesg'}
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    bond_id = Column(Integer, ForeignKey("xlonesg.bonds.id", ondelete="CASCADE"), nullable=False)
-    project_id = Column(Integer, ForeignKey("xlonesg.project_tracking.id", ondelete="CASCADE"), nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.current_timestamp())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.current_timestamp())
-    created_by = Column(String(100))
-    updated_by = Column(String(100))
+    environmental_documentid = Column(
+        Integer, 
+        ForeignKey("xlonesg.environmental_document.id"),
+        unique=True
+    )
+    enterprisename = Column(String(255))
+    projectlocation = Column(String(255))
+    activitydescription = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True))
 
-    # Relacionamentos diretos
-    bond = relationship("Bond", back_populates="project_relations")
-    project = relationship("ProjectTracking", back_populates="bond_relations")
+    # Relacionamento com o documento ambiental
+    environmental_document = relationship(
+        "EnvironmentalDocument",
+        foreign_keys=[environmental_documentid]
+    )
+
+class InfoLibraryDocument(Base):
+    __tablename__ = "infolibrary_documents"
+    __table_args__ = {"schema": "xlonesg"}
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(255), nullable=False)
+    document_type = Column(String(100), nullable=False)
+    reference_date = Column(String(10), nullable=True)
+    description = Column(Text, nullable=True)
+    file_path = Column(String(255), nullable=False)
+    original_filename = Column(String(255), nullable=False)
+    file_size = Column(Integer, nullable=False)
+    mime_type = Column(String(100), nullable=True)
+    uploaded_by = Column(String(100), nullable=False, server_default='system')
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+
